@@ -22,11 +22,6 @@ from pathlib import Path
 
 import tensorflow as tf
 
-BUCKET = os.environ["BUCKET"]
-MODEL_DIR = os.getenv("MODEL_DIR", "models/flores").strip("/")
-EPOCHS = int(os.getenv("EPOCHS", "8"))
-IMG = int(os.getenv("IMG_SIZE", "128"))
-BATCH = int(os.getenv("BATCH", "32"))
 SEED = 42
 
 # Dataset público de flores que Google sirve... desde Cloud Storage.
@@ -50,11 +45,20 @@ def preparar_dataset() -> Path:
     return data_dir
 
 
-def construir_modelo(n_clases: int) -> tf.keras.Model:
-    """Una CNN pequeña pero honesta. La misma que enseñamos en las slides."""
+def construir_modelo(n_clases: int, img: int = 128) -> tf.keras.Model:
+    """La CNN del taller: pequeña pero honesta. Importable desde el cuaderno para enseñarla.
+
+    Capas:
+      Rescaling          normaliza píxeles 0-255 -> 0-1
+      RandomFlip/Rotation aumento de datos (solo activo en entrenamiento)
+      Conv2D + MaxPool x3 extraen patrones (bordes -> texturas -> formas) y reducen tamaño
+      GlobalAveragePooling resume cada mapa de características en un número
+      Dense + Dropout      clasificador, con dropout para no sobreajustar
+      Dense softmax        una probabilidad por clase
+    """
     from tensorflow.keras import layers, models
     return models.Sequential([
-        layers.Input(shape=(IMG, IMG, 3)),
+        layers.Input(shape=(img, img, 3)),
         layers.Rescaling(1.0 / 255),
         layers.RandomFlip("horizontal"),
         layers.RandomRotation(0.1),
@@ -69,6 +73,12 @@ def construir_modelo(n_clases: int) -> tf.keras.Model:
 
 
 def main():
+    BUCKET = os.environ["BUCKET"]
+    MODEL_DIR = os.getenv("MODEL_DIR", "models/flores").strip("/")
+    EPOCHS = int(os.getenv("EPOCHS", "8"))
+    IMG = int(os.getenv("IMG_SIZE", "128"))
+    BATCH = int(os.getenv("BATCH", "32"))
+
     data_dir = preparar_dataset()
 
     train_ds = tf.keras.utils.image_dataset_from_directory(
@@ -84,7 +94,7 @@ def main():
     train_ds = train_ds.cache().prefetch(AUTOTUNE)
     val_ds = val_ds.cache().prefetch(AUTOTUNE)
 
-    model = construir_modelo(len(clases))
+    model = construir_modelo(len(clases), IMG)
     model.compile(optimizer="adam",
                   loss="sparse_categorical_crossentropy", metrics=["accuracy"])
     model.summary()

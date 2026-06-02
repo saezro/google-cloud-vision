@@ -304,9 +304,45 @@ code('''ver_bucket()''')
 md("""## Paso 5 · Entrenar tu propia CNN desde cero en Cloud Run (job)
 
 Aquí está el corazón del taller: **entrenamos un modelo desde cero** con nuestras propias clases
-(5 tipos de flor). Lo hacemos con un **Cloud Run job** —un contenedor que arranca, entrena y muere—
-construido desde `cloud/entrenamiento/`. Corre **como la SA de runtime** y recibe toda la config por
-variables de entorno. Lo lanzamos en segundo plano (`--async`, ~10-15 min) y seguimos mientras tanto.
+(5 tipos de flor). Antes de lanzarlo, veamos **qué** vamos a entrenar.""")
+
+md("""### La arquitectura de la CNN
+
+Esta es la red que usamos — pequeña pero suficiente para el caso (con ~60 mil parámetros llega a un
+`val_accuracy ≈ 0.62` sobre 5 clases). La idea de una CNN: las **capas convolucionales** detectan
+patrones cada vez más complejos (primero bordes, luego texturas, luego formas) y el **clasificador**
+final convierte eso en una probabilidad por clase.
+
+| Bloque | Capas | Qué hace |
+|---|---|---|
+| Entrada y normalizado | `Input` + `Rescaling` | imagen 128×128×3, píxeles a rango 0-1 |
+| Aumento de datos | `RandomFlip`, `RandomRotation` | variaciones al vuelo (solo al entrenar) para generalizar mejor |
+| Extracción ×3 | `Conv2D` + `MaxPooling2D` | aprenden patrones y reducen el tamaño (128→63→30→14) |
+| Resumen | `GlobalAveragePooling2D` | cada mapa de características → un número (64 en total) |
+| Clasificador | `Dense(64)` + `Dropout` | combina las características; el dropout evita sobreajuste |
+| Salida | `Dense(softmax)` | una probabilidad por clase (5 flores) |
+
+La mostramos tal cual (es **la misma función** que usa el job, importada del repo):""")
+code('''# Importamos la arquitectura REAL del job (cloud/entrenamiento/train.py) y la enseñamos
+import sys
+sys.path.insert(0, "cloud/entrenamiento")
+from train import construir_modelo
+
+modelo_demo = construir_modelo(n_clases=5, img=128)
+modelo_demo.summary()''')
+md("Y el mismo modelo como diagrama, para verlo de un vistazo:")
+code('''# Diagrama del modelo (si faltara graphviz, no pasa nada: arriba ya tienes el summary)
+try:
+    from tensorflow.keras.utils import plot_model
+    display(plot_model(modelo_demo, show_shapes=True, show_layer_names=False, dpi=60))
+except Exception as e:
+    print("No se pudo dibujar el diagrama (", e, ") -- usa el summary de arriba")''')
+
+md("""### Lanzar el entrenamiento
+
+Ahora sí: desplegamos el **Cloud Run job** desde `cloud/entrenamiento/` —un contenedor que arranca,
+entrena y muere—. Corre **como la SA de runtime** y recibe la config por variables de entorno. Lo
+lanzamos en segundo plano (`--async`, ~2-3 min) y seguimos mientras tanto.
 
 > En la sesión, el modelo ya está entrenado en el bucket de antes, así que el siguiente paso no
 > espera: verás las métricas al momento mientras este job corre por detrás.""")
