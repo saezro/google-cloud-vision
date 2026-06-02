@@ -86,9 +86,15 @@ REPO    = f"{REGION}-docker.pkg.dev/{PROJECT}/cloud-run-source-deploy"
 IMG_JOB = f"{REPO}/taller-entrenar-flores:latest"       # imagen del entrenamiento (CUDA)
 IMG_SVC = f"{REPO}/taller-inferencia-flores:latest"     # imagen de la inferencia (CUDA)
 
+# --- Configuración de la MÁQUINA (lo que pides a Cloud Run para job y service) ---
+GPU_TYPE = "nvidia-l4"                                  # tipo de GPU
+CPU      = 4                                            # vCPUs (mínimo 4 con GPU)
+MEMORY   = "16Gi"                                       # memoria (mínimo 16Gi con GPU L4)
+
 !gcloud config set project {PROJECT} -q
 print("Proyecto activo:", PROJECT)
-print("Bucket:", BUCKET, "| región:", REGION)''')
+print("Bucket:", BUCKET, "| región:", REGION)
+print("Máquina: 1x", GPU_TYPE, "|", CPU, "vCPU |", MEMORY)''')
 
 # ============================================================ UTILIDADES
 md("""## Utilidades
@@ -395,8 +401,8 @@ solo.
 > En la sesión el modelo ya está en el bucket, así que el Paso 6 no espera.""")
 code('''!gcloud run jobs deploy {JOB} --image {IMG_JOB} --region {REGION} \\
   --service-account {RUNTIME_SA} \\
-  --gpu 1 --gpu-type nvidia-l4 --no-gpu-zonal-redundancy \\
-  --cpu 4 --memory 16Gi --task-timeout 3600 --max-retries 0 \\
+  --gpu 1 --gpu-type {GPU_TYPE} --no-gpu-zonal-redundancy \\
+  --cpu {CPU} --memory {MEMORY} --task-timeout 3600 --max-retries 0 \\
   --set-env-vars BUCKET={BUCKET},MODEL_DIR={MODEL_DIR},EPOCHS={EPOCHS},IMG_SIZE={IMG_SIZE} -q
 !gcloud run jobs execute {JOB} --region {REGION} --async
 print("Entrenando en GPU. Llama a esperar_modelo() cuando quieras el resultado.")''')
@@ -428,8 +434,8 @@ md("""> El código del service —una API FastAPI que carga el SavedModel de GCS
 > está en **`cloud/inferencia/main.py`**. Ábrelo para explicarlo por dentro.""")
 code('''!gcloud run deploy {SERVICE} --image {IMG_SVC} --region {REGION} \\
   --service-account {RUNTIME_SA} \\
-  --gpu 1 --gpu-type nvidia-l4 --no-gpu-zonal-redundancy \\
-  --cpu 4 --memory 16Gi --timeout 180 --min-instances 0 --max-instances 1 \\
+  --gpu 1 --gpu-type {GPU_TYPE} --no-gpu-zonal-redundancy \\
+  --cpu {CPU} --memory {MEMORY} --timeout 180 --min-instances 0 --max-instances 1 \\
   --set-env-vars MODEL_GCS={MODEL_GCS} -q
 print("Service (GPU) desplegado en:", _service_url())''')
 md("Y clasificamos las tres flores de prueba contra **nuestro** modelo, el que acabamos de entrenar:")
@@ -534,15 +540,15 @@ SVC_DEMO = "demo-inferencia"
 # 1) Crear el JOB (desde la imagen, ~30 s)
 !gcloud run jobs deploy {JOB_DEMO} --image {IMG_JOB} --region {REGION} \\
   --service-account {RUNTIME_SA} \\
-  --gpu 1 --gpu-type nvidia-l4 --no-gpu-zonal-redundancy \\
-  --cpu 4 --memory 16Gi --task-timeout 3600 --max-retries 0 \\
+  --gpu 1 --gpu-type {GPU_TYPE} --no-gpu-zonal-redundancy \\
+  --cpu {CPU} --memory {MEMORY} --task-timeout 3600 --max-retries 0 \\
   --set-env-vars BUCKET={BUCKET},MODEL_DIR=models/demo,EPOCHS={EPOCHS},IMG_SIZE={IMG_SIZE} -q
 
 # 2) Crear el SERVICE (desde la imagen, ~30-60 s)
 !gcloud run deploy {SVC_DEMO} --image {IMG_SVC} --region {REGION} \\
   --service-account {RUNTIME_SA} \\
-  --gpu 1 --gpu-type nvidia-l4 --no-gpu-zonal-redundancy \\
-  --cpu 4 --memory 16Gi --timeout 180 --min-instances 0 --max-instances 1 \\
+  --gpu 1 --gpu-type {GPU_TYPE} --no-gpu-zonal-redundancy \\
+  --cpu {CPU} --memory {MEMORY} --timeout 180 --min-instances 0 --max-instances 1 \\
   --set-env-vars MODEL_GCS={MODEL_GCS} -q
 print("Job y service de demo creados.")''')
 md("Opcional: lanzar el entrenamiento del job de demo (~3-4 min en GPU).")
