@@ -113,6 +113,13 @@ roles/cloudbuild.builds.builder # ejecutar builds
 roles/iam.serviceAccountUser    # *** ver abajo ***
 ```
 
+> **¿Cloud Build SA o Compute SA?** Desde 2024, `gcloud run deploy --source` corre el build, por
+> defecto, como la **Compute Engine default SA** (`NUMERO-compute@developer...`), no como la antigua
+> `NUMERO@cloudbuild...`. Como no sabes la antigüedad del proyecto del asistente, **da los roles a las
+> dos** y te ahorras el fallo. El síntoma despista mucho: el error habla de
+> `storage.objects.get denied` (no puede leer el código fuente que se sube al bucket de staging del
+> build), no de "build" — y uno se vuelve loco buscando por el lado equivocado. **Es el error #2.**
+
 **c) El permiso que más se olvida — "actuar como" (`serviceAccountUser`).**
 
 ```bash

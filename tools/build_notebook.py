@@ -144,7 +144,7 @@ Funciones de apoyo que usamos más abajo (mostrar imágenes del bucket, esperar 
 pintar las gráficas, llamar al modelo servido). **No hace falta leerlo** para seguir el taller —
 ejecútala y a otra cosa.""")
 code('''import io, json, time, subprocess
-import requests, numpy as np, matplotlib.pyplot as plt
+import requests, numpy as np, pandas as pd, matplotlib.pyplot as plt
 from PIL import Image
 !pip -q install google-cloud-storage
 from google.cloud import storage
@@ -200,7 +200,31 @@ def clasificar(uri, modelo=None):
     print(f"{uri}\\n   -> {d['prediccion']}  ({d['confianza']}%)   top: {[r['clase'] for r in d['ranking']]}")
     return d
 
+def registro_modelos():
+    """Inventario de modelos = leer la 'ficha' (metrics.json) de cada carpeta en models/.
+
+    No hay base de datos aparte: el propio bucket es el registro. Cada modelo guarda su
+    metrics.json al entrenarse/subirse, y listándolos tienes tu catálogo con dónde está
+    cada uno y cómo llamarlo."""
+    filas = []
+    for b in _sc.list_blobs(BUCKET, prefix="models/"):
+        if not b.name.endswith("/metrics.json"):
+            continue
+        meta = json.loads(b.download_as_text())
+        carpeta = b.name.rsplit("/", 1)[0]            # models/<nombre>
+        filas.append({
+            "modelo": carpeta.split("/", 1)[1],
+            "descripcion": meta.get("modelo", "CNN entrenada (flores)"),
+            "n_clases": len(meta.get("classes", [])),
+            "img_size": meta.get("img_size"),
+            "val_accuracy": meta.get("val_accuracy"),     # None si es pre-entrenado
+            "actualizado": b.updated.strftime("%Y-%m-%d %H:%M") if b.updated else None,
+            "ruta_gcs": f"gs://{BUCKET}/{carpeta}",        # <- dónde está; esto es lo que pasas a clasificar()
+        })
+    return pd.DataFrame(filas).sort_values("modelo").reset_index(drop=True)
+
 print("Utilidades listas")''')
+
 
 # ============================================================ 2 · APIs
 md("""## Paso 2 · Activar las APIs del proyecto
@@ -227,7 +251,13 @@ Montamos dos cosas:
 2. Los **permisos de despliegue para Cloud Build**: quien construye la imagen y la sube a Cloud Run.
 
 El permiso que todo el mundo olvida es `serviceAccountUser` = **"actuar como"** la otra cuenta. Sin
-él, Cloud Build no puede desplegar un servicio que corre *como* la SA de runtime. Es el error nº1.""")
+él, Cloud Build no puede desplegar un servicio que corre *como* la SA de runtime. Es el error nº1.
+
+> **Quién construye, en realidad.** `gcloud run deploy --source` empaqueta tu código con Cloud Build.
+> Desde 2024 ese build corre, por defecto, como la **service account por defecto de Compute Engine**
+> (`NUMERO-compute@developer...`) — no como la antigua `@cloudbuild`. Como no sabemos la antigüedad de
+> tu proyecto, damos los permisos a **las dos** para que no falle. Es el error nº2 (y muy puñetero,
+> porque el mensaje habla de "storage.objects.get" y despista).""")
 code('''# 3.1 — Crear la service account con la que correrán job y service
 !gcloud iam service-accounts create taller-vision-sa \\
   --display-name="Taller Vision runtime" 2>/dev/null || echo "(ya existe)"
@@ -237,19 +267,21 @@ for ROLE in ["roles/storage.admin", "roles/serviceusage.serviceUsageConsumer"]:
     !gcloud projects add-iam-policy-binding {PROJECT} \\
       --member="serviceAccount:{RUNTIME_SA}" --role={ROLE} --condition=None -q > /dev/null
 print("Service account de runtime con permisos")''')
-code('''# 3.2 — Permisos de despliegue para Cloud Build (NO usamos Compute Engine: todo es Cloud Run)
+code('''# 3.2 — Permisos de despliegue para quien construye (las DOS posibles SA de build)
 PNUM = (!gcloud projects describe {PROJECT} --format="value(projectNumber)")[0].strip()
-BUILD_SA = f"{PNUM}@cloudbuild.gserviceaccount.com"
+BUILD_SAS = [f"{PNUM}-compute@developer.gserviceaccount.com",  # builder por defecto (2024+)
+             f"{PNUM}@cloudbuild.gserviceaccount.com"]         # builder antiguo
 
-for ROLE in ["roles/run.admin", "roles/iam.serviceAccountUser", "roles/artifactregistry.admin",
-             "roles/storage.admin", "roles/logging.logWriter", "roles/cloudbuild.builds.builder"]:
-    !gcloud projects add-iam-policy-binding {PROJECT} \\
-      --member="serviceAccount:{BUILD_SA}" --role={ROLE} --condition=None -q > /dev/null
-
-# "actuar como" la SA de runtime: el permiso que más se olvida
-!gcloud iam service-accounts add-iam-policy-binding {RUNTIME_SA} \\
-  --member="serviceAccount:{BUILD_SA}" --role="roles/iam.serviceAccountUser" -q > /dev/null
-print("Cloud Build listo para desplegar (espera ~30-60s a que el IAM propague)")''')
+ROLES = ["roles/run.admin", "roles/iam.serviceAccountUser", "roles/artifactregistry.admin",
+         "roles/storage.admin", "roles/logging.logWriter", "roles/cloudbuild.builds.builder"]
+for SA in BUILD_SAS:
+    for ROLE in ROLES:
+        !gcloud projects add-iam-policy-binding {PROJECT} \\
+          --member="serviceAccount:{SA}" --role={ROLE} --condition=None -q > /dev/null
+    # "actuar como" la SA de runtime: el permiso que más se olvida
+    !gcloud iam service-accounts add-iam-policy-binding {RUNTIME_SA} \\
+      --member="serviceAccount:{SA}" --role="roles/iam.serviceAccountUser" -q > /dev/null
+print("Permisos de build concedidos (espera ~30-60s a que el IAM propague)")''')
 
 # ============================================================ 4 · BUCKET
 md("""## Paso 4 · Cloud Storage — crear el bucket y subir las imágenes
@@ -355,8 +387,28 @@ code('''clasificar(IMG, modelo=PRETRAIN_GCS)
 clasificar(f"gs://{BUCKET}/demo/rosa.jpg", modelo=PRETRAIN_GCS)
 clasificar(f"gs://{BUCKET}/demo/margarita.jpg", modelo=PRETRAIN_GCS)''')
 
-# ============================================================ 9 · CIERRE
-md("""## Paso 9 · Repaso, costes y limpieza
+# ============================================================ 9 · INVENTARIO DE MODELOS
+md("""## Paso 9 · Inventario de modelos (un mini "registro")
+
+Ahora tienes **dos** modelos en el bucket y, en cuanto entrenes variantes (más épocas, otras clases,
+otra versión…), tendrás más. ¿Cómo sabes qué tienes y dónde está cada uno para poder llamarlo?
+
+La clave: cuando guardamos un modelo, **al lado dejamos su ficha** (`metrics.json` con clases, tamaño,
+accuracy…). El propio bucket **es** el registro — no hace falta una base de datos aparte. Si listamos
+esas fichas, tenemos un **inventario** en forma de tabla (un DataFrame):""")
+code('''inventario = registro_modelos()
+inventario''')
+md("""Eso es, en pequeño, un **model registry**: un catálogo de qué modelos hay, sus métricas y **dónde
+viven** (`ruta_gcs`). Con la ruta, llamar a cualquiera es trivial — eliges la fila que quieras y se la
+pasas al service. Versionar es tan simple como guardar en `models/flores/v2`, `.../v3`… y aparecerán
+como filas nuevas.""")
+code('''# Elegir un modelo del inventario por su nombre y clasificar con él
+ruta = inventario.set_index("modelo").loc["imagenet", "ruta_gcs"]
+print("Uso el modelo:", ruta)
+clasificar(IMG, modelo=ruta)''')
+
+# ============================================================ 10 · CIERRE
+md("""## Paso 10 · Repaso, costes y limpieza
 
 Lo que has montado, de punta a punta y **todo en tu proyecto**:
 
