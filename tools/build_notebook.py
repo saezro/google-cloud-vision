@@ -29,62 +29,11 @@ De un dataset de imágenes a un modelo en producción, **todo en tu nube**:
 El modelo es **tuyo** y corre en **tu** infraestructura: tú lo entrenas, tú lo despliegas, tú lo
 llamas. Nada pre-hecho ni externo.
 
-**Cómo va el cuaderno:** dale al play de arriba a abajo. Cada sección explica *qué* hace y *por qué*.
-Casi todo es idempotente —si algo ya existe, no rompe—, así que puedes re-ejecutar sin miedo.""")
+**Cómo va:** dale al play de arriba a abajo. Es idempotente (si algo ya existe, no rompe).
 
-md("""### Antes de empezar: Colab **no** es Google Cloud
-
-Es el malentendido número uno, así que vamos claros:
-
-| Dónde corre | Qué hace |
-|---|---|
-| **Este Colab** (una máquina de Google, *fuera* de tu proyecto) | el **mando**: te autentica, lanza comandos `gcloud`, enseña imágenes y gráficas, llama a los endpoints |
-| **Tu proyecto de Google Cloud** | **lo pesado y lo que persiste**: Storage, **Cloud Run** (entrena y sirve el modelo) |
-
-Consecuencias prácticas: lo que hace este Colab **no** aparece en tu factura de GCP, **no** hay
-ninguna VM ni Compute Engine de por medio, y si cierras la pestaña, lo que dejaste en Cloud Run
-**sigue vivo**.
-
-**Lo único que damos por hecho:** que ya tienes un **proyecto** de Google Cloud con **billing**
-activado (eso se hace una vez, con un par de clics, en la consola web). Todo lo demás lo montamos
-aquí, paso a paso.""")
-
-# ============================================================ CONCEPTOS
-md("""## Conceptos · las piezas de Google Cloud que vamos a usar
-
-Antes de tocar nada, el mapa. Todo en GCP cuelga de un **proyecto** (la unidad de facturación y de
-permisos). Dentro vamos a usar cinco piezas:
-
-**1 · Cloud Storage — el almacén.** Guardas ficheros (imágenes, el modelo entrenado…) en **buckets**.
-Cada objeto tiene una URI tipo `gs://mi-bucket/carpeta/archivo.jpg`. Es el disco compartido al que
-todo lo demás se conecta.
-
-**2 · IAM — quién puede hacer qué.** La regla de oro: **una identidad** tiene **un rol** sobre **un
-recurso**. Una identidad puede ser una persona o una **service account** (una "cuenta de robot" con la
-que corren los programas, sin contraseñas). En el taller creamos una service account para que nuestros
-contenedores tengan permiso de leer/escribir en el bucket.
-
-**3 · Cloud Build + Artifact Registry — construir el contenedor.** Tú entregas tu código y un
-`Dockerfile`; Cloud Build lo empaqueta en una **imagen de contenedor** y la guarda en Artifact
-Registry. Esa imagen es lo que Cloud Run ejecuta.
-
-**4 · Cloud Run — donde corre tu código.** Ejecuta contenedores sin que gestiones servidores. Y aquí
-está la distinción clave del taller: Cloud Run tiene **dos formas** de correr algo.""")
-
-md("""### Cloud Run JOB vs SERVICE — la diferencia que hay que tener clara
-
-| | **Job** (tarea) | **Service** (servicio) |
-|---|---|---|
-| Qué es | un contenedor que **arranca, hace una tarea y muere** | un contenedor que **se queda escuchando** peticiones HTTP |
-| Vive | mientras dura el trabajo, luego se apaga | siempre disponible (escala a 0 cuando nadie lo usa) |
-| Cómo se invoca | lo **ejecutas** (`jobs execute`) | le **mandas peticiones** (HTTP a su URL) |
-| Para qué, aquí | **entrenar** el modelo (empieza, entrena, termina) | **servir** el modelo (responde a cada inferencia) |
-| Analogía | un horno: lo enciendes, cocina, se apaga | un restaurante: abierto, atiende cuando llega gente |
-
-Es el eje del taller: **entrenas con un JOB** (Paso 5) y **sirves con un SERVICE** (Pasos 7-8). Mismo
-Cloud Run, dos modos para dos necesidades distintas.
-
-Con el mapa claro, vamos a montarlo.""")
+> La teoría (qué es GCP, IAM, **job vs service**, qué es una CNN) va en las slides. Aquí, lo justo
+> para seguir el código. Recordatorio de bolsillo: **Colab = el mando; GCP = el cómputo. Un JOB
+> entrena y muere; un SERVICE se queda sirviendo.** Damos por hecho un proyecto con **billing**.""")
 
 # ============================================================ TRAER EL REPO
 md("""## Paso 0 · Traer el código
@@ -115,10 +64,8 @@ proyectos = [p for p in proyectos if p.strip()]
 _dd = widgets.Dropdown(options=proyectos, description="Proyecto:")
 display(_dd)''')
 
-md("""### El resto de la config se deriva sola
-
-A partir del proyecto que elegiste, se calculan el nombre del bucket, la cuenta de servicio, los
-nombres del job y del service, etc. No hace falta tocar nada; si quisieras, aquí es donde lo harías.""")
+md("""**El resto de la config se deriva del proyecto** (bucket, service account, nombres). No hace
+falta tocar nada; si quisieras, es aquí.""")
 code('''PROJECT       = _dd.value                               # el que elegiste arriba
 REGION        = "europe-southwest1"                     # región de todo (bucket, Cloud Run)
 EPOCHS        = 8                                        # épocas de entrenamiento de la CNN
@@ -320,9 +267,8 @@ print("Utilidades listas")''')
 # ============================================================ 2 · APIs
 md("""## Paso 2 · Activar las APIs del proyecto
 
-En Google Cloud cada servicio se activa **por proyecto**. Encendemos los que vamos a usar de una vez:
-Storage (el bucket), Cloud Run + Cloud Build + Artifact Registry (construir y servir contenedores) e
-IAM (los permisos).""")
+Cada servicio se activa **por proyecto**. Encendemos los que usaremos: Storage, Cloud Run, Cloud
+Build, Artifact Registry e IAM.""")
 code('''!gcloud services enable \\
   storage.googleapis.com \\
   run.googleapis.com cloudbuild.googleapis.com \\
@@ -332,23 +278,13 @@ print("APIs activadas")''')
 # ============================================================ 3 · IAM
 md("""## Paso 3 · IAM — quién puede hacer qué
 
-Esta es la parte que más se atasca en la vida real, así que va con calma. La idea de IAM es siempre la
-misma: **una identidad** tiene **un rol** sobre **un recurso**.
+Montamos dos cosas: (3.1) una **service account de runtime** con la que corren job y service (sin
+claves en el código), y (3.2) los **permisos de build**. Dos detalles clave (en las slides está el
+porqué):
 
-Montamos dos cosas:
-
-1. Una **service account de runtime**: la "identidad" con la que **corren** nuestros servicios de
-   Cloud Run, sin contraseñas ni claves metidas en el código.
-2. Los **permisos de despliegue para Cloud Build**: quien construye la imagen y la sube a Cloud Run.
-
-El permiso que todo el mundo olvida es `serviceAccountUser` = **"actuar como"** la otra cuenta. Sin
-él, Cloud Build no puede desplegar un servicio que corre *como* la SA de runtime. Es el error nº1.
-
-> **Quién construye, en realidad.** `gcloud run deploy --source` empaqueta tu código con Cloud Build.
-> Desde 2024 ese build corre, por defecto, como la **service account por defecto de Compute Engine**
-> (`NUMERO-compute@developer...`) — no como la antigua `@cloudbuild`. Como no sabemos la antigüedad de
-> tu proyecto, damos los permisos a **las dos** para que no falle. Es el error nº2 (y muy puñetero,
-> porque el mensaje habla de "storage.objects.get" y despista).""")
+- `serviceAccountUser` = **"actuar como"** la SA: sin él, el deploy falla. Es el error nº1.
+- El build corre como la **SA de Compute** (cambio de 2024), no la `@cloudbuild`. Damos permisos a
+  **las dos** por si acaso. El síntoma despista: habla de `storage.objects.get`.""")
 code('''# 3.1 — Crear la service account con la que correrán job y service
 !gcloud iam service-accounts create taller-vision-sa \\
   --display-name="Taller Vision runtime" 2>/dev/null || echo "(ya existe)"
@@ -377,8 +313,8 @@ print("Permisos de build concedidos (espera ~30-60s a que el IAM propague)")''')
 # ============================================================ 4 · BUCKET
 md("""## Paso 4 · Cloud Storage — crear el bucket y subir las imágenes
 
-El **bucket** es el almacén donde viven las imágenes y, más tarde, el modelo entrenado. Lo creamos
-ahora (no existía hasta este punto) y subimos las fotos de prueba que vinieron en el repo.""")
+El **bucket** es el almacén (imágenes ahora, modelos después). Lo creamos y subimos las fotos de
+prueba del repo.""")
 code('''# Crear el bucket (idempotente: si ya estaba, no pasa nada)
 !gcloud storage buckets create gs://{BUCKET} \\
   --location={REGION} --uniform-bucket-level-access -q || echo "(ya existía)"''')
@@ -399,22 +335,8 @@ Aquí está el corazón del taller: **entrenamos un modelo desde cero** con nues
 
 md("""### La arquitectura de la CNN
 
-Esta es la red que usamos — pequeña pero suficiente para el caso (con ~60 mil parámetros llega a un
-`val_accuracy ≈ 0.62` sobre 5 clases). La idea de una CNN: las **capas convolucionales** detectan
-patrones cada vez más complejos (primero bordes, luego texturas, luego formas) y el **clasificador**
-final convierte eso en una probabilidad por clase.
-
-| Bloque | Capas | Qué hace |
-|---|---|---|
-| Entrada y normalizado | `Input` + `Rescaling` | imagen 128×128×3, píxeles a rango 0-1 |
-| Aumento de datos | `RandomFlip`, `RandomRotation` | variaciones al vuelo (solo al entrenar) para generalizar mejor |
-| Extracción ×3 | `Conv2D` + `MaxPooling2D` | aprenden patrones y reducen el tamaño (128→63→30→14) |
-| Resumen | `GlobalAveragePooling2D` | cada mapa de características → un número (64 en total) |
-| Clasificador | `Dense(64)` + `Dropout` | combina las características; el dropout evita sobreajuste |
-| Salida | `Dense(softmax)` | una probabilidad por clase (5 flores) |
-
-Veamos primero **cómo se construye**, capa a capa. Es **la misma función** que usa el job (la
-importamos del repo y enseñamos su código tal cual, sin copiar nada):""")
+La red que entrenamos (la teoría de conv/pool/dropout, en las slides). Mostramos **su código real**,
+el mismo que usa el job — lo importamos del repo, sin copiar nada:""")
 code('''# Importamos la arquitectura REAL del job y mostramos su código de construcción
 import sys, inspect
 sys.path.insert(0, "cloud/entrenamiento")
@@ -431,12 +353,11 @@ code('''dibujar_cnn_3d(modelo_demo)''')
 
 md("""### Lanzar el entrenamiento
 
-Ahora sí: desplegamos el **Cloud Run job** desde `cloud/entrenamiento/` —un contenedor que arranca,
-entrena y muere—. Corre **como la SA de runtime** y recibe la config por variables de entorno. Lo
-lanzamos en segundo plano (`--async`, ~2-3 min) y seguimos mientras tanto.
+Desplegamos el **job** desde `cloud/entrenamiento/` y lo ejecutamos en segundo plano (`--async`,
+~2-3 min). Corre como la SA de runtime, con la config por variables de entorno.
 
-> En la sesión, el modelo ya está entrenado en el bucket de antes, así que el siguiente paso no
-> espera: verás las métricas al momento mientras este job corre por detrás.""")
+> En la sesión el modelo ya está en el bucket, así que el Paso 6 no espera: las métricas salen al
+> momento mientras el job corre por detrás.""")
 code('''%cd cloud/entrenamiento
 !gcloud run jobs deploy {JOB} --source . --region {REGION} \\
   --service-account {RUNTIME_SA} \\
@@ -449,25 +370,20 @@ print("Entrenando en la nube. Llama a esperar_modelo() cuando quieras el resulta
 # ============================================================ 6 · STATS
 md("""## Paso 6 · Ver cómo ha aprendido el modelo
 
-El entrenamiento deja en el bucket un `metrics.json` con todo el historial. La siguiente celda
-**espera** a que esté (si ya estaba, sigue al momento) y pinta las curvas de accuracy y loss.""")
+El job deja un `metrics.json` en el bucket. Esperamos a que esté (si ya estaba, sigue al momento) y
+pintamos las curvas de accuracy y loss.""")
 code('''esperar_modelo()
 m = stats()''')
 
 # ============================================================ 7 · INFERIR
 md("""## Paso 7 · Servir tu modelo en Cloud Run e inferir
 
-Ya tienes el modelo entrenado; ahora lo pones a trabajar. Desplegamos el otro tipo de Cloud Run: un
-**service** (siempre disponible, escala a 0 cuando no se usa) que carga el modelo desde el bucket y
-responde a peticiones. Se construye desde `cloud/inferencia/`.
+Desplegamos un **service** (siempre disponible, escala a 0) desde `cloud/inferencia/`. Es **agnóstico
+al modelo**: carga el que le digas y lee sus clases y tamaño del `metrics.json` — lo aprovecharemos en
+el Paso 8.
 
-El service es **agnóstico al modelo**: carga el que le digas (`MODEL_GCS` por defecto, o el que pases
-en cada petición) y lee del `metrics.json` sus clases y su tamaño de entrada. Lo aprovecharemos en el
-Paso 8.
-
-> La organización bloquea el acceso público, así que el service queda **privado** y lo llamamos
-> autenticados con un id-token (lo hace `clasificar()` por dentro). Es, de hecho, la práctica
-> recomendada aunque pudieras abrirlo.""")
+> Queda **privado** (la org bloquea el acceso público), así que se llama con un id-token; lo hace
+> `clasificar()` por dentro.""")
 code('''%cd cloud/inferencia
 !gcloud run deploy {SERVICE} --source . --region {REGION} \\
   --service-account {RUNTIME_SA} \\
@@ -483,13 +399,10 @@ clasificar(f"gs://{BUCKET}/demo/margarita.jpg")''')
 # ============================================================ 8 · MODELO PRE-ENTRENADO
 md("""## Paso 8 · Servir un modelo pre-entrenado (sin entrenar nada)
 
-Entrenar está bien cuando las clases son tuyas, pero a veces quieres un modelo **grande y ya entrenado**
-sin gastar ni un minuto en entrenarlo. Aquí descargamos **MobileNetV2**, entrenado por Google con
-**ImageNet** (1000 clases), y lo servimos **en tu mismo Cloud Run** — ojo, esto es muy distinto de la
-Vision API: ahí el modelo corre en los servidores de Google; aquí el modelo es un fichero en **tu**
-bucket que sirve **tu** service.
-
-La preparación (bajar el modelo y dejarlo servible) la hace Colab, igual que antes subía las imágenes.""")
+A veces quieres un modelo **grande y ya entrenado** sin entrenarlo tú. Descargamos **MobileNetV2**
+(ImageNet, 1000 clases) y lo servimos en **tu mismo Cloud Run** (no es la Vision API: aquí el modelo
+es un fichero en **tu** bucket que sirve **tu** service). La descarga la hace Colab, como con las
+imágenes.""")
 code('''# Descargar MobileNetV2 (ImageNet) y dejarlo servible en el bucket, como hizo el job con tu CNN
 import tensorflow as tf, json
 
@@ -517,18 +430,13 @@ clasificar(f"gs://{BUCKET}/demo/margarita.jpg", modelo=PRETRAIN_GCS)''')
 # ============================================================ 9 · INVENTARIO DE MODELOS
 md("""## Paso 9 · Inventario de modelos (un mini "registro")
 
-Ahora tienes **dos** modelos en el bucket y, en cuanto entrenes variantes (más épocas, otras clases,
-otra versión…), tendrás más. ¿Cómo sabes qué tienes y dónde está cada uno para poder llamarlo?
-
-La clave: cuando guardamos un modelo, **al lado dejamos su ficha** (`metrics.json` con clases, tamaño,
-accuracy…). El propio bucket **es** el registro — no hace falta una base de datos aparte. Si listamos
-esas fichas, tenemos un **inventario** en forma de tabla (un DataFrame):""")
+Ya tienes **dos** modelos, y con el tiempo más. Cada uno guarda su ficha (`metrics.json`) al lado, así
+que **el propio bucket es el registro**: listando esas fichas tienes un inventario (un DataFrame), sin
+base de datos aparte.""")
 code('''inventario = registro_modelos()
 inventario''')
-md("""Eso es, en pequeño, un **model registry**: un catálogo de qué modelos hay, sus métricas y **dónde
-viven** (`ruta_gcs`). Con la ruta, llamar a cualquiera es trivial — eliges la fila que quieras y se la
-pasas al service. Versionar es tan simple como guardar en `models/flores/v2`, `.../v3`… y aparecerán
-como filas nuevas.""")
+md("""Un **model registry** en pequeño: qué hay, sus métricas y **dónde vive cada uno** (`ruta_gcs`).
+Con esa ruta llamas a cualquiera. Versionar = guardar en `models/flores/v2`, `v3`… → filas nuevas.""")
 code('''# Elegir un modelo del inventario por su nombre y clasificar con él
 ruta = inventario.set_index("modelo").loc["imagenet", "ruta_gcs"]
 print("Uso el modelo:", ruta)
