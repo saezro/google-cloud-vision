@@ -381,14 +381,10 @@ El embudo típico de una CNN — el **mapa espacial encoge** mientras la **profu
 (32→64→128→256), hasta que el clasificador lo reduce a 102 probabilidades.""")
 code('''dibujar_cnn_3d(modelo_demo)''')
 
-md("""### El código del job, entero (`cloud/entrenamiento/train.py`)
+md("""> El resto del entrenamiento (cargar Flores-102, el bucle de entreno, guardar el modelo) vive en
+> **`cloud/entrenamiento/train.py`** — ábrelo en el explorador de archivos de Colab para verlo entero.
 
-Esto es lo que corre dentro del contenedor del job: carga Flores-102, monta la CNN, entrena en GPU,
-evalúa y guarda el modelo + `metrics.json` en el bucket. Lo vemos con resaltado para explicarlo:""")
-code('''from IPython.display import Code
-Code(filename="cloud/entrenamiento/train.py", language="python")''')
-
-md("""### Crear el job y lanzar el entrenamiento (en GPU)
+### Crear el job y lanzar el entrenamiento (en GPU)
 
 Creamos el **job con GPU** (`--gpu 1 --gpu-type nvidia-l4`) **desde la imagen ya construida**
 (`--image`, sin esperar al build) y lo ejecutamos en segundo plano (`--async`). TensorFlow ve la GPU
@@ -428,11 +424,8 @@ Creamos un **service con GPU** (`--gpu 1 --gpu-type nvidia-l4`) **desde la image
 >
 > Queda **privado** (la org bloquea el acceso público): se llama con un id-token, lo hace
 > `clasificar()` por dentro.""")
-md("""**El código del service, entero** (`cloud/inferencia/main.py`): una API FastAPI que carga el
-SavedModel desde GCS (cacheado), y en `/predict` lee la imagen, la pasa por el modelo y devuelve la
-clase + el ranking. Es agnóstico al modelo (toma `img_size` y clases del `metrics.json`):""")
-code('''from IPython.display import Code
-Code(filename="cloud/inferencia/main.py", language="python")''')
+md("""> El código del service —una API FastAPI que carga el SavedModel de GCS y responde en `/predict`—
+> está en **`cloud/inferencia/main.py`**. Ábrelo para explicarlo por dentro.""")
 code('''!gcloud run deploy {SERVICE} --image {IMG_SVC} --region {REGION} \\
   --service-account {RUNTIME_SA} \\
   --gpu 1 --gpu-type nvidia-l4 --no-gpu-zonal-redundancy \\
