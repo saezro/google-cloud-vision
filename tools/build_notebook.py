@@ -237,21 +237,16 @@ print("Subidas:", sorted(glob.glob("imagenes/*.jpg")))''')
 md("Y las vemos *desde el bucket* (se descargan de GCS, no son las locales):")
 code('''ver_bucket()''')
 
-# ============================================================ 5 · VISION
-md("""## Paso 5 · Vision API — de la imagen a una decisión
+# ============================================================ 5 · ENTRENAR
+md("""## Paso 5 · Entrenar tu propia CNN desde cero en Cloud Run (job)
 
-Aquí no entrenamos nada: mandamos la imagen a la **Vision API** y nos devuelve etiquetas, objetos y
-texto ya reconocidos. Encima de esa respuesta aplicamos una **regla de negocio** trivial (¿hay una
-flor? → ACEPTAR, si no → REVISAR) para ver el salto de "datos" a "decisión".""")
-code('''decision(IMG)''')
+Aquí está el corazón del taller: **entrenamos un modelo desde cero** con nuestras propias clases
+(5 tipos de flor). Lo hacemos con un **Cloud Run job** —un contenedor que arranca, entrena y muere—
+construido desde `cloud/entrenamiento/`. Corre **como la SA de runtime** y recibe toda la config por
+variables de entorno. Lo lanzamos en segundo plano (`--async`, ~10-15 min) y seguimos mientras tanto.
 
-# ============================================================ 6 · ENTRENAR
-md("""## Paso 6 · Entrenar tu propia CNN en Cloud Run (job)
-
-Cuando las clases son **tuyas** (aquí, 5 tipos de flor), la Vision API genérica no basta: entrenas tu
-modelo. Lo hacemos con un **Cloud Run job** —un contenedor que arranca, entrena y muere— construido
-desde `cloud/entrenamiento/`. Corre **como la SA de runtime** y recibe toda la config por variables de
-entorno. Lo lanzamos en segundo plano (`--async`, ~10-15 min) y seguimos con el taller mientras tanto.""")
+> En la sesión, el modelo ya está entrenado en el bucket de antes, así que el siguiente paso no
+> espera: verás las métricas al momento mientras este job corre por detrás.""")
 code('''%cd cloud/entrenamiento
 !gcloud run jobs deploy {JOB} --source . --region {REGION} \\
   --service-account {RUNTIME_SA} \\
@@ -261,19 +256,20 @@ code('''%cd cloud/entrenamiento
 !gcloud run jobs execute {JOB} --region {REGION} --async
 print("Entrenando en la nube. Llama a esperar_modelo() cuando quieras el resultado.")''')
 
-# ============================================================ 7 · STATS
-md("""## Paso 7 · Ver cómo ha aprendido el modelo
+# ============================================================ 6 · STATS
+md("""## Paso 6 · Ver cómo ha aprendido el modelo
 
-Cuando el job termina, deja en el bucket un `metrics.json` con el historial de entrenamiento. La
-siguiente celda **espera** a que esté y luego pinta las curvas de accuracy y loss.""")
+El entrenamiento deja en el bucket un `metrics.json` con todo el historial. La siguiente celda
+**espera** a que esté (si ya estaba, sigue al momento) y pinta las curvas de accuracy y loss.""")
 code('''esperar_modelo()
 m = stats()''')
 
-# ============================================================ 8 · INFERIR
-md("""## Paso 8 · Servir el modelo en Cloud Run e inferir
+# ============================================================ 7 · INFERIR
+md("""## Paso 7 · Servir el modelo en Cloud Run e inferir
 
-Ahora el otro tipo de Cloud Run: un **service** (siempre disponible, escala a 0 cuando no se usa) que
-carga el modelo desde el bucket y responde a peticiones. Lo desplegamos desde `cloud/inferencia/`.
+Ya tienes el modelo entrenado; ahora lo pones a trabajar. Desplegamos el otro tipo de Cloud Run: un
+**service** (siempre disponible, escala a 0 cuando no se usa) que carga el modelo desde el bucket y
+responde a peticiones. Se construye desde `cloud/inferencia/`.
 
 > La organización bloquea el acceso público, así que el service queda **privado** y lo llamamos
 > autenticados con un id-token (lo hace `clasificar()` por dentro). Es, de hecho, la práctica
@@ -285,15 +281,23 @@ code('''%cd cloud/inferencia
   --set-env-vars MODEL_GCS={MODEL_GCS} -q
 %cd ../..
 print("Service desplegado en:", _service_url())''')
-md("Y clasificamos las tres flores de prueba contra **nuestro** modelo:")
+md("Y clasificamos las tres flores de prueba contra **nuestro** modelo, el que acabamos de entrenar:")
 code('''clasificar(IMG)
 clasificar(f"gs://{BUCKET}/demo/rosa.jpg")
 clasificar(f"gs://{BUCKET}/demo/margarita.jpg")''')
 
-# ============================================================ 9 · CIERRE
-md("""## Paso 9 · Cuándo cada uno, costes y limpieza
+# ============================================================ 8 · VISION (contraste, al final)
+md("""## Paso 8 · Y además: la Vision API (esto, pero ya hecho)
 
-**La decisión de fondo:**
+Acabas de **entrenar y servir** un modelo a mano. Conviene saber que, para clases **genéricas**,
+Google ya tiene un modelo entrenado y servido que usas como servicio: la **Vision API**. Le mandas
+una imagen y te devuelve etiquetas, objetos y texto (OCR) ya reconocidos — **tú no entrenas ni
+despliegas nada**.
+
+Lo probamos sobre la misma foto y le ponemos encima una **regla de negocio** trivial (¿hay una flor?
+→ ACEPTAR, si no → REVISAR), para ver el contraste con lo que construimos arriba:""")
+code('''decision(IMG)''')
+md("""**¿Cuándo cada uno?**
 
 | | Vision API | Tu CNN en Cloud Run |
 |---|---|---|
@@ -302,11 +306,15 @@ md("""## Paso 9 · Cuándo cada uno, costes y limpieza
 | Puesta en marcha | inmediata | construir + desplegar |
 | Control | el que da la API | total |
 
-Regla práctica: si tus clases están entre las que Google ya reconoce, **Vision API**; si son
-específicas de tu negocio, **modelo propio**.
+Regla práctica: si tus clases están entre las que Google ya reconoce, tira de **Vision API**; si son
+específicas de tu negocio (defectos, piezas, documentos tuyos…), no hay atajo: **modelo propio**,
+justo lo que montaste en los pasos 5-7.""")
+
+# ============================================================ 9 · CIERRE
+md("""## Paso 9 · Costes y limpieza
 
 **Costes:** con `--min-instances 0` el service no cuesta nada en reposo; el job solo cuesta mientras
-entrena; Vision regala 1.000 usos al mes. Todo es **CPU, sin GPU**.
+entrena; la Vision API regala 1.000 usos al mes. Todo es **CPU, sin GPU**.
 
 **Limpieza** (se lleva por delante todo lo creado):
 

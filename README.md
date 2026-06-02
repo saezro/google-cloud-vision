@@ -10,11 +10,12 @@ servida en **Cloud Run**. Todo corre en la nube; Colab solo manda.
 
 ## La idea
 
-Una foto no es un dato hasta que algo la convierte en una decisión. Aquí montamos ese "algo" de dos
-formas y se ve cuándo conviene cada una:
+El hilo es entrenar un modelo **desde cero** y ponerlo a servir inferencias, todo en la nube:
 
-- **Vision API** — etiquetas, objetos y texto (OCR) sin entrenar nada.
-- **CNN propia** — cuando las clases son tuyas, entrenas tu modelo y lo sirves como una API.
+- **CNN propia** — el grueso del taller: con tus clases, entrenas el modelo en un job de Cloud Run y
+  lo sirves como una API en un service de Cloud Run.
+- **Vision API** — al final, como contraste: para clases genéricas, Google ya tiene ese modelo hecho
+  y lo usas como servicio, sin entrenar nada.
 
 ## Cómo está montado
 
@@ -41,10 +42,10 @@ Puedes trastear sin miedo: lo que edites en Colab es tuyo, no toca el repo ni a 
 ## Qué va haciendo
 
 1. Crea un bucket y sube unas imágenes.
-2. Pasa una foto por la Vision API y saca un veredicto.
-3. Entrena una CNN de flores en un job de Cloud Run y guarda el modelo en el bucket.
-4. Enseña las gráficas de cómo ha aprendido.
-5. Sirve el modelo en Cloud Run y clasifica fotos nuevas.
+2. Entrena una CNN de flores **desde cero** en un job de Cloud Run y guarda el modelo en el bucket.
+3. Enseña las gráficas de cómo ha aprendido.
+4. Sirve el modelo en Cloud Run y clasifica fotos nuevas.
+5. Y al final, como contraste, pasa una foto por la Vision API (lo mismo, pero ya hecho por Google).
 
 ## Qué hay en el repo
 
