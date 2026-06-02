@@ -311,7 +311,8 @@ for ROLE in ["roles/storage.admin", "roles/serviceusage.serviceUsageConsumer"]:
       --member="serviceAccount:{RUNTIME_SA}" --role={ROLE} --condition=None -q > /dev/null
 print("Service account de runtime con permisos")''')
 code('''# 3.2 — Permisos de despliegue para quien construye (las DOS posibles SA de build)
-PNUM = (!gcloud projects describe {PROJECT} --format="value(projectNumber)")[0].strip()
+_pnum = !gcloud projects describe {PROJECT} --format="value(projectNumber)"
+PNUM = _pnum[0].strip()
 BUILD_SAS = [f"{PNUM}-compute@developer.gserviceaccount.com",  # builder por defecto (2024+)
              f"{PNUM}@cloudbuild.gserviceaccount.com"]         # builder antiguo
 
