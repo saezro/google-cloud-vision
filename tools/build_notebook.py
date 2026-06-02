@@ -67,18 +67,24 @@ display(_dd)''')
 md("""**El resto de la config se deriva del proyecto** (bucket, service account, nombres). No hace
 falta tocar nada; si quisieras, es aquí.""")
 code('''PROJECT       = _dd.value                               # el que elegiste arriba
-REGION        = "europe-southwest1"                     # región de todo (bucket, Cloud Run)
-EPOCHS        = 8                                        # épocas de entrenamiento de la CNN
+REGION        = "europe-west4"                           # región con GPU L4 (bucket + Cloud Run)
+EPOCHS        = 15                                       # pocas épocas: en GPU entrena en ~3-4 min
+IMG_SIZE      = 180                                      # lado de la imagen de entrada de la CNN
 BUCKET        = f"{PROJECT}-imagenes"                    # nombre del bucket (único por proyecto)
 
-MODEL_DIR     = "models/flores"                          # tu CNN entrenada (carpeta en el bucket)
+MODEL_DIR     = "models/flores102"                       # tu CNN entrenada (carpeta en el bucket)
 MODEL_GCS     = f"gs://{BUCKET}/{MODEL_DIR}"             # URI de tu modelo
 PRETRAIN_DIR  = "models/imagenet"                        # modelo pre-entrenado (lo descargamos)
 PRETRAIN_GCS  = f"gs://{BUCKET}/{PRETRAIN_DIR}"          # URI del modelo pre-entrenado
 
 RUNTIME_SA = f"taller-vision-sa@{PROJECT}.iam.gserviceaccount.com"  # SA con la que corre todo
-JOB        = "taller-entrenar-flores"                   # Cloud Run job (entrena)
-SERVICE    = "taller-inferencia-flores"                 # Cloud Run service (sirve cualquier modelo)
+JOB        = "taller-entrenar-flores"                   # Cloud Run job con GPU (entrena)
+SERVICE    = "taller-inferencia-flores"                 # Cloud Run service con GPU (sirve)
+
+# Imágenes de contenedor YA CONSTRUIDAS (pre-charla). El deploy las usa con --image (~30s, sin build).
+REPO    = f"{REGION}-docker.pkg.dev/{PROJECT}/cloud-run-source-deploy"
+IMG_JOB = f"{REPO}/taller-entrenar-flores:latest"       # imagen del entrenamiento (CUDA)
+IMG_SVC = f"{REPO}/taller-inferencia-flores:latest"     # imagen de la inferencia (CUDA)
 
 !gcloud config set project {PROJECT} -q
 print("Proyecto activo:", PROJECT)
@@ -120,13 +126,17 @@ def esperar_modelo():
 def stats():
     """Lee las métricas que dejó el entrenamiento y pinta accuracy/loss."""
     m = json.loads(_bucket().blob(f"{MODEL_DIR}/metrics.json").download_as_text())
-    h, clases = m["history"], m["classes"]
-    print(f"val_accuracy: {m['val_accuracy']*100:.1f}%  | clases: {clases}")
+    h = m["history"]
+    top5 = m.get("val_top5")
+    print(f"clases: {len(m['classes'])}  |  val_accuracy (top-1): {m['val_accuracy']*100:.1f}%"
+          + (f"  |  top-5: {top5*100:.1f}%" if top5 else ""))
     fig, (a1, a2) = plt.subplots(1, 2, figsize=(12, 4))
     a1.plot(h["accuracy"], label="train"); a1.plot(h["val_accuracy"], label="val"); a1.set_title("Accuracy"); a1.legend()
     a2.plot(h["loss"], label="train"); a2.plot(h["val_loss"], label="val"); a2.set_title("Loss"); a2.legend()
     plt.show()
-    print("por clase:", m["accuracy_por_clase"])
+    pc = sorted(m["accuracy_por_clase"].items(), key=lambda kv: kv[1], reverse=True)
+    print("mejores clases:", [f"{k} {v:.0%}" for k, v in pc[:5]])
+    print("peores clases: ", [f"{k} {v:.0%}" for k, v in pc[-5:]])
     return m
 
 def _service_url():
@@ -243,8 +253,8 @@ def dibujar_arquitectura():
           "5 · lanzar el job", "7 · desplegar el service", "8 · pedir inferencias",
           "9 · inventario de modelos"], fc="#F0F0F0")
     caja(40, 58, 54, 22, AZUL, "Cloud Storage · bucket",
-         ["demo/                 imágenes de prueba", "models/flores         tu CNN entrenada",
-          "models/imagenet   MobileNet descargado"], fc="#EAF0F7")
+         ["demo/                  imágenes de prueba", "models/flores102   tu CNN entrenada",
+          "models/imagenet    MobileNet descargado"], fc="#EAF0F7")
     caja(40, 31, 25, 18, VERDE, "Cloud Run JOB", ["entrena la CNN", "(arranca y muere)"], fc="#EAF3EE")
     caja(69, 31, 25, 18, NARANJA, "Cloud Run SERVICE", ["sirve cualquier", "modelo (HTTP)"], fc="#FBEFE6")
     caja(40, 9, 54, 13, MORADO, "IAM + Cloud Build",
@@ -327,11 +337,31 @@ print("Subidas:", sorted(glob.glob("imagenes/*.jpg")))''')
 md("Y las vemos *desde el bucket* (se descargan de GCS, no son las locales):")
 code('''ver_bucket()''')
 
-# ============================================================ 5 · ENTRENAR
-md("""## Paso 5 · Entrenar tu propia CNN desde cero en Cloud Run (job)
+# ============================================================ IMÁGENES (precompiladas)
+md("""## Las imágenes de los contenedores (ya construidas)
 
-Aquí está el corazón del taller: **entrenamos un modelo desde cero** con nuestras propias clases
-(5 tipos de flor). Antes de lanzarlo, veamos **qué** vamos a entrenar.""")
+El job y el service son **contenedores**. Su imagen (con `tensorflow[and-cuda]` para GPU) se construye
+**una sola vez** con Cloud Build a partir de `cloud/entrenamiento/` y `cloud/inferencia/`, y se guarda
+en **Artifact Registry**. Así el `deploy` de después es **instantáneo** (`--image`, ~30 s) en vez de
+esperar ~10 min de build.
+
+Se construyen así (es lento, **ya está hecho** — en la charla no se re-ejecuta):
+
+```
+gcloud builds submit cloud/entrenamiento --tag IMG_JOB --region REGION
+gcloud builds submit cloud/inferencia    --tag IMG_SVC --region REGION
+```
+
+Comprobamos que las imágenes existen:""")
+code('''print("Job   :", IMG_JOB)
+print("Service:", IMG_SVC)
+!gcloud artifacts docker images list {REPO} --include-tags --filter="tags:latest" --format="value(package,tags)" 2>/dev/null''')
+
+# ============================================================ 5 · ENTRENAR
+md("""## Paso 5 · Entrenar tu propia CNN desde cero en Cloud Run (job, con GPU)
+
+El corazón del taller: **entrenamos una CNN desde cero** sobre **Oxford Flowers 102** (102 clases de
+flor, ~8.000 imágenes), en una **GPU NVIDIA L4**. Antes de lanzarlo, veamos **qué** vamos a entrenar.""")
 
 md("""### La arquitectura de la CNN
 
@@ -343,29 +373,37 @@ sys.path.insert(0, "cloud/entrenamiento")
 from train import construir_modelo
 
 print(inspect.getsource(construir_modelo))''')
-md("La instanciamos (5 clases, 128×128) y miramos su resumen — capas, formas y nº de parámetros:")
-code('''modelo_demo = construir_modelo(n_clases=5, img=128)
+md("La instanciamos (102 clases, 180×180) y miramos su resumen — capas, formas y nº de parámetros:")
+code('''modelo_demo = construir_modelo(n_clases=102, img=180)
 modelo_demo.summary()''')
 md("""Y en **3D**, para verlo de un vistazo: cada bloque es el volumen de datos que sale de esa capa.
-Se ve el embudo típico de una CNN — el **mapa espacial encoge** (128→63→30→14) mientras la
-**profundidad de canales crece** (3→32→64), hasta que el clasificador lo reduce a 5 probabilidades.""")
+El embudo típico de una CNN — el **mapa espacial encoge** mientras la **profundidad de canales crece**
+(32→64→128→256), hasta que el clasificador lo reduce a 102 probabilidades.""")
 code('''dibujar_cnn_3d(modelo_demo)''')
 
-md("""### Lanzar el entrenamiento
+md("""### El código del job, entero (`cloud/entrenamiento/train.py`)
 
-Desplegamos el **job** desde `cloud/entrenamiento/` y lo ejecutamos en segundo plano (`--async`,
-~2-3 min). Corre como la SA de runtime, con la config por variables de entorno.
+Esto es lo que corre dentro del contenedor del job: carga Flores-102, monta la CNN, entrena en GPU,
+evalúa y guarda el modelo + `metrics.json` en el bucket. Lo vemos con resaltado para explicarlo:""")
+code('''from IPython.display import Code
+Code(filename="cloud/entrenamiento/train.py", language="python")''')
 
-> En la sesión el modelo ya está en el bucket, así que el Paso 6 no espera: las métricas salen al
-> momento mientras el job corre por detrás.""")
-code('''%cd cloud/entrenamiento
-!gcloud run jobs deploy {JOB} --source . --region {REGION} \\
+md("""### Crear el job y lanzar el entrenamiento (en GPU)
+
+Creamos el **job con GPU** (`--gpu 1 --gpu-type nvidia-l4`) **desde la imagen ya construida**
+(`--image`, sin esperar al build) y lo ejecutamos en segundo plano (`--async`). TensorFlow ve la GPU
+solo.
+
+> **Coste:** un **job no cuesta nada en reposo** — arranca, entrena, **libera la GPU y muere**. Solo
+> pagas los minutos de entrenamiento. El `--task-timeout` es un tope de seguridad.
+> En la sesión el modelo ya está en el bucket, así que el Paso 6 no espera.""")
+code('''!gcloud run jobs deploy {JOB} --image {IMG_JOB} --region {REGION} \\
   --service-account {RUNTIME_SA} \\
-  --cpu 4 --memory 8Gi --task-timeout 3600 --max-retries 0 \\
-  --set-env-vars BUCKET={BUCKET},MODEL_DIR={MODEL_DIR},EPOCHS={EPOCHS} -q
-%cd ../..
+  --gpu 1 --gpu-type nvidia-l4 --no-gpu-zonal-redundancy \\
+  --cpu 4 --memory 16Gi --task-timeout 3600 --max-retries 0 \\
+  --set-env-vars BUCKET={BUCKET},MODEL_DIR={MODEL_DIR},EPOCHS={EPOCHS},IMG_SIZE={IMG_SIZE} -q
 !gcloud run jobs execute {JOB} --region {REGION} --async
-print("Entrenando en la nube. Llama a esperar_modelo() cuando quieras el resultado.")''')
+print("Entrenando en GPU. Llama a esperar_modelo() cuando quieras el resultado.")''')
 
 # ============================================================ 6 · STATS
 md("""## Paso 6 · Ver cómo ha aprendido el modelo
@@ -376,21 +414,31 @@ code('''esperar_modelo()
 m = stats()''')
 
 # ============================================================ 7 · INFERIR
-md("""## Paso 7 · Servir tu modelo en Cloud Run e inferir
+md("""## Paso 7 · Servir tu modelo en Cloud Run e inferir (en GPU)
 
-Desplegamos un **service** (siempre disponible, escala a 0) desde `cloud/inferencia/`. Es **agnóstico
-al modelo**: carga el que le digas y lee sus clases y tamaño del `metrics.json` — lo aprovecharemos en
-el Paso 8.
+Creamos un **service con GPU** (`--gpu 1 --gpu-type nvidia-l4`) **desde la imagen ya construida**
+(`--image`). Es **agnóstico al modelo**: carga el que le digas y lee sus clases y tamaño del
+`metrics.json` — lo aprovecharemos en el Paso 8.
 
-> Queda **privado** (la org bloquea el acceso público), así que se llama con un id-token; lo hace
+> **Coste — el apagado automático es CLAVE con GPU.** Va con `--min-instances 0`: cuando nadie lo usa,
+> Cloud Run **apaga la instancia y deja de cobrar la GPU**. Sin esto, una GPU encendida cuesta cada
+> hora. La primera petición tras un rato paga un **arranque en frío** (la imagen CUDA + cargar el
+> modelo, ~1 min). Para la charla: `--min-instances 1` ese rato (sin cold start), y a **0 al acabar**.
+> `--max-instances` pone un techo de gasto.
+>
+> Queda **privado** (la org bloquea el acceso público): se llama con un id-token, lo hace
 > `clasificar()` por dentro.""")
-code('''%cd cloud/inferencia
-!gcloud run deploy {SERVICE} --source . --region {REGION} \\
+md("""**El código del service, entero** (`cloud/inferencia/main.py`): una API FastAPI que carga el
+SavedModel desde GCS (cacheado), y en `/predict` lee la imagen, la pasa por el modelo y devuelve la
+clase + el ranking. Es agnóstico al modelo (toma `img_size` y clases del `metrics.json`):""")
+code('''from IPython.display import Code
+Code(filename="cloud/inferencia/main.py", language="python")''')
+code('''!gcloud run deploy {SERVICE} --image {IMG_SVC} --region {REGION} \\
   --service-account {RUNTIME_SA} \\
-  --cpu 2 --memory 4Gi --timeout 180 --min-instances 0 \\
+  --gpu 1 --gpu-type nvidia-l4 --no-gpu-zonal-redundancy \\
+  --cpu 4 --memory 16Gi --timeout 180 --min-instances 0 --max-instances 1 \\
   --set-env-vars MODEL_GCS={MODEL_GCS} -q
-%cd ../..
-print("Service desplegado en:", _service_url())''')
+print("Service (GPU) desplegado en:", _service_url())''')
 md("Y clasificamos las tres flores de prueba contra **nuestro** modelo, el que acabamos de entrenar:")
 code('''clasificar(IMG)
 clasificar(f"gs://{BUCKET}/demo/rosa.jpg")
@@ -436,7 +484,7 @@ base de datos aparte.""")
 code('''inventario = registro_modelos()
 inventario''')
 md("""Un **model registry** en pequeño: qué hay, sus métricas y **dónde vive cada uno** (`ruta_gcs`).
-Con esa ruta llamas a cualquiera. Versionar = guardar en `models/flores/v2`, `v3`… → filas nuevas.""")
+Con esa ruta llamas a cualquiera. Versionar = guardar en `models/flores102/v2`, `v3`… → filas nuevas.""")
 code('''# Elegir un modelo del inventario por su nombre y clasificar con él
 ruta = inventario.set_index("modelo").loc["imagenet", "ruta_gcs"]
 print("Uso el modelo:", ruta)
@@ -458,14 +506,59 @@ md("""Las ideas que se llevan a casa:
   entrenes tú o lo descargues hecho, **corre en tu infraestructura** (esa es la diferencia con una
   API gestionada como Vision).
 
-**Costes:** con `--min-instances 0` el service no cuesta nada en reposo; el job solo cuesta mientras
-entrena. Todo es **CPU, sin GPU**.
+**Costes — quién paga qué y cuándo (todo en GPU, así que el apagado importa):**
 
-**Limpieza** (se lleva por delante todo lo creado):
+| Recurso | ¿Cuesta en reposo? | Cómo lo controlamos |
+|---|---|---|
+| **Job (GPU)** | **No.** Arranca, entrena y **muere**. | Solo pagas los minutos de entrenamiento. `--task-timeout` = tope. |
+| **Service (GPU)** | **No**, con `--min-instances 0`. | **Se apaga solo** cuando nadie lo usa (la GPU deja de cobrar). `--max-instances` = techo. |
+| **Bucket** | Céntimos. | Almacenamiento de imágenes y modelos. |
+
+Las dos GPU solo están encendidas cuando hacen falta: el **job** los minutos que entrena, el
+**service** solo mientras atiende peticiones. Para la charla: `--min-instances 1` en el service ese
+rato (sin cold start), y **a 0 al acabar** — si no, una GPU parada sigue cobrando.
+
+**Limpieza** (se lleva por delante todo lo creado, incluido cualquier resto que cobre):
 
 ```
 !gcloud projects delete {PROJECT}
 ```""")
+
+# ============================================================ EXTRA · crear desde cero en vivo
+md("""## Extra · Crear un job y un service desde cero, en vivo (si da tiempo)
+
+Para **enseñar la mecánica de crear** un job y un service (con otros nombres, sin tocar los de arriba).
+Como van **desde la imagen ya construida** (`--image`), crear los dos tarda **~1 minuto**. Si no da
+tiempo, sáltatelo.
+
+> **Cuota de GPU:** tu proyecto tiene un tope de memoria por región. Si ya están vivos el job y el
+> service de arriba (16 GiB cada uno), crear estos otros con GPU puede chocar con la cuota. Si pasa,
+> borra primero los de arriba (`gcloud run jobs delete ...`, `gcloud run services delete ...`) o pide
+> más cuota. Al final hay una celda de limpieza.""")
+code('''JOB_DEMO = "demo-entrenar"
+SVC_DEMO = "demo-inferencia"
+
+# 1) Crear el JOB (desde la imagen, ~30 s)
+!gcloud run jobs deploy {JOB_DEMO} --image {IMG_JOB} --region {REGION} \\
+  --service-account {RUNTIME_SA} \\
+  --gpu 1 --gpu-type nvidia-l4 --no-gpu-zonal-redundancy \\
+  --cpu 4 --memory 16Gi --task-timeout 3600 --max-retries 0 \\
+  --set-env-vars BUCKET={BUCKET},MODEL_DIR=models/demo,EPOCHS={EPOCHS},IMG_SIZE={IMG_SIZE} -q
+
+# 2) Crear el SERVICE (desde la imagen, ~30-60 s)
+!gcloud run deploy {SVC_DEMO} --image {IMG_SVC} --region {REGION} \\
+  --service-account {RUNTIME_SA} \\
+  --gpu 1 --gpu-type nvidia-l4 --no-gpu-zonal-redundancy \\
+  --cpu 4 --memory 16Gi --timeout 180 --min-instances 0 --max-instances 1 \\
+  --set-env-vars MODEL_GCS={MODEL_GCS} -q
+print("Job y service de demo creados.")''')
+md("Opcional: lanzar el entrenamiento del job de demo (~3-4 min en GPU).")
+code('''!gcloud run jobs execute {JOB_DEMO} --region {REGION} --async
+print("Entrenando (demo) en segundo plano.")''')
+md("Limpieza de los recursos de demo (para liberar la cuota de GPU):")
+code('''!gcloud run jobs delete {JOB_DEMO} --region {REGION} -q
+!gcloud run services delete {SVC_DEMO} --region {REGION} -q
+print("Recursos de demo borrados.")''')
 
 nb = {"cells": cells,
       "metadata": {"colab": {"provenance": [], "name": "google-cloud-vision.ipynb"},

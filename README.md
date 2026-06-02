@@ -50,9 +50,9 @@ Puedes trastear sin miedo: lo que edites en Colab es tuyo, no toca el repo ni a 
 
 1. Activa las APIs y monta el **IAM** (una service account con la que corre todo).
 2. Crea un **bucket** y sube unas imágenes.
-3. Entrena una CNN de flores **desde cero** en un **job** de Cloud Run y guarda el modelo en el bucket.
-4. Enseña las gráficas de cómo ha aprendido.
-5. Despliega un **service** de Cloud Run y clasifica fotos nuevas con tu modelo.
+3. Entrena una CNN **desde cero** sobre **Oxford Flowers 102** (102 clases) en un **job de Cloud Run con GPU** (NVIDIA L4) y guarda el modelo en el bucket.
+4. Enseña las gráficas de cómo ha aprendido (top-1 y top-5).
+5. Despliega un **service** de Cloud Run **con GPU** y clasifica fotos nuevas con tu modelo.
 6. Descarga un modelo **pre-entrenado** (MobileNet/ImageNet) y lo sirve en el **mismo** service.
 
 ## Qué hay en el repo
@@ -70,11 +70,18 @@ Puedes trastear sin miedo: lo que edites en Colab es tuyo, no toca el repo ni a 
 
 - Un proyecto de Google Cloud con **billing** (se crea desde la web, un par de clics).
 - Permisos para crear cuentas de servicio. El IAM lo hace el cuaderno por ti.
+- Una **región con GPU NVIDIA L4** (por defecto `europe-west4`) y **cuota de GPU** para Cloud Run.
 
 ## Cuánto cuesta
 
-Casi nada: Storage son céntimos y Cloud Run entra en la capa gratis para una demo. Con el service a
-`--min-instances 0` no pagas en reposo, y el job solo cuesta mientras entrena. Todo es CPU, **sin GPU**.
+Poco, y acotado (entreno e inferencia van en **GPU**, así que el apagado automático es clave):
+
+- **Job (GPU L4)** — no cuesta nada en reposo: arranca, entrena y **muere**. Solo pagas los minutos de entrenamiento.
+- **Service (GPU L4)** — con `--min-instances 0` se **apaga solo** cuando nadie lo usa; la GPU deja de cobrar en reposo.
+- **Bucket** — céntimos.
+
+Ninguna GPU se queda encendida sola: el job muere al acabar y el service escala a 0. Para la charla,
+sube el service a `--min-instances 1` ese rato (sin arranque en frío) y bájalo a 0 al terminar.
 
 ## Para limpiar
 

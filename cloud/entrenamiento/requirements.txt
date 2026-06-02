@@ -1,1 +1,6 @@
-tensorflow-cpu==2.17.0
+# TensorFlow con soporte CUDA (las libs de NVIDIA vienen como wheels de pip).
+# El driver lo pone Cloud Run cuando despliegas con --gpu.
+tensorflow[and-cuda]==2.17.0
+tensorflow-datasets==4.9.6
+importlib_resources   # tfds 4.9.x lo importa pero no lo declara en Python 3.11
+scipy                 # tfds lee las etiquetas .mat de Flowers-102 con scipy.io.loadmat

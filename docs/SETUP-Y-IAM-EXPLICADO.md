@@ -153,12 +153,13 @@ autorizo a poner en marcha algo en mi nombre". Si falta este permiso, el deploy 
 
 ```bash
 gcloud storage buckets create gs://tu-proyecto-gcp-imagenes \
-  --location=europe-southwest1 --uniform-bucket-level-access
+  --location=europe-west4 --uniform-bucket-level-access
 ```
 
 - `--uniform-bucket-level-access`: los permisos se gestionan **solo por IAM** (no ACLs por objeto).
   Más simple y más seguro.
-- Aquí viven dos cosas: las **imágenes** (`demo/`) y el **modelo entrenado** (`models/flores/`).
+- Aquí viven dos cosas: las **imágenes** (`demo/`) y el **modelo entrenado** (`models/flores102/`).
+- Región `europe-west4`: es una de las que tienen **GPU NVIDIA L4** para Cloud Run (el job entrena en GPU).
 
 ---
 
@@ -166,8 +167,11 @@ gcloud storage buckets create gs://tu-proyecto-gcp-imagenes \
 
 Cloud Run ejecuta contenedores. Tiene dos formas:
 - **Job**: corre hasta **terminar** una tarea. Perfecto para **entrenar** (`taller-entrenar-flores`).
+  Lo desplegamos **con GPU** (`--gpu 1 --gpu-type nvidia-l4`): entrena en GPU y al acabar **muere**
+  (no cuesta nada en reposo).
 - **Service**: responde a **HTTP** siempre. Perfecto para **servir** la inferencia
-  (`taller-inferencia-flores`).
+  (`taller-inferencia-flores`). Va **con GPU** (`--gpu 1 --gpu-type nvidia-l4`) y con
+  `--min-instances 0` **se apaga solo** cuando nadie lo usa (la GPU deja de cobrar en reposo).
 
 Ambos se despliegan con `--service-account taller-vision-sa@...` (corren como esa identidad) y
 reciben su configuración por **variables de entorno** (`BUCKET`, `MODEL_GCS`, `EPOCHS`):
@@ -175,11 +179,12 @@ reciben su configuración por **variables de entorno** (`BUCKET`, `MODEL_GCS`, `
 ```bash
 gcloud run jobs deploy taller-entrenar-flores --source . \
   --service-account taller-vision-sa@PROJECT.iam.gserviceaccount.com \
-  --set-env-vars BUCKET=...,MODEL_DIR=models/flores,EPOCHS=8
+  --gpu 1 --gpu-type nvidia-l4 --no-gpu-zonal-redundancy --cpu 4 --memory 16Gi \
+  --set-env-vars BUCKET=...,MODEL_DIR=models/flores102,EPOCHS=40,IMG_SIZE=180
 
 gcloud run deploy taller-inferencia-flores --source . \
   --service-account taller-vision-sa@PROJECT.iam.gserviceaccount.com \
-  --min-instances 1 --set-env-vars MODEL_GCS=gs://.../models/flores
+  --min-instances 0 --set-env-vars MODEL_GCS=gs://.../models/flores102
 ```
 
 - **Variables de entorno** = el código no "descubre" nada en caliente; lo lee al arrancar → más
