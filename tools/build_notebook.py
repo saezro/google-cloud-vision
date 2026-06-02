@@ -223,6 +223,48 @@ def registro_modelos():
         })
     return pd.DataFrame(filas).sort_values("modelo").reset_index(drop=True)
 
+def dibujar_cnn_3d(model):
+    """Dibuja las capas conv/pool como volúmenes 3D apilados (alto×ancho = mapa espacial,
+    grosor = nº de canales). El diagrama clásico de una CNN: el mapa encoge, la profundidad crece."""
+    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
+    from matplotlib.patches import Patch
+    colores = {"Entrada": "#9AA7B0", "Conv2D": "#4C72B0", "MaxPooling2D": "#55A868",
+               "GlobalAveragePooling2D": "#8172B3", "Dense": "#DD8452"}
+    # caja de entrada + solo las capas que cambian de forma (saltamos normalizado y aumento de datos)
+    e = tuple(model.layers[0].output.shape)  # forma de entrada (salida del Rescaling)
+    cajas = [("Entrada", e[1], e[2], e[3], f"{e[1]}×{e[2]}×{e[3]}")]
+    for L in model.layers:
+        n = L.__class__.__name__
+        if n not in ("Conv2D", "MaxPooling2D", "Dense", "GlobalAveragePooling2D"):
+            continue
+        s = tuple(L.output.shape)
+        if len(s) == 4:
+            _, h, w, c = s; cajas.append((n, h, w, c, f"{h}×{w}×{c}"))
+        else:
+            _, u = s; cajas.append((n, max(u/8, 2), max(u/8, 2), u, f"{u}"))
+    fig = plt.figure(figsize=(15, 5.5))
+    ax = fig.add_subplot(111, projection="3d")
+    x = 0.0
+    for i, (nombre, h, w, c, etiq) in enumerate(cajas):
+        dy, dz = w / 8.0, h / 8.0
+        dx = max(c / 16.0, 0.3)
+        col = colores.get(nombre, "#BBBBBB")
+        x0, y0, z0 = x, -dy / 2, -dz / 2
+        v = np.array([[x0,y0,z0],[x0+dx,y0,z0],[x0+dx,y0+dy,z0],[x0,y0+dy,z0],
+                      [x0,y0,z0+dz],[x0+dx,y0,z0+dz],[x0+dx,y0+dy,z0+dz],[x0,y0+dy,z0+dz]])
+        caras = [[v[0],v[1],v[2],v[3]],[v[4],v[5],v[6],v[7]],[v[0],v[1],v[5],v[4]],
+                 [v[2],v[3],v[7],v[6]],[v[1],v[2],v[6],v[5]],[v[0],v[3],v[7],v[4]]]
+        ax.add_collection3d(Poly3DCollection(caras, facecolor=col, edgecolor="white",
+                                             linewidths=0.4, alpha=0.92))
+        z_lab = dz/2 + (1.2 if i % 2 == 0 else 3.6)   # alternar altura para no solapar
+        ax.text(x0+dx/2, 0, z_lab, etiq, ha="center", va="bottom", fontsize=8)
+        x += dx + 3.0
+    ax.set_xlim(0, x); ax.set_ylim(-9, 9); ax.set_zlim(-9, 11)
+    ax.set_axis_off(); ax.view_init(elev=18, azim=-68)
+    ax.legend(handles=[Patch(facecolor=c, label=n) for n, c in colores.items()],
+              loc="upper center", ncol=5, fontsize=8, frameon=False, bbox_to_anchor=(0.5, 0.02))
+    plt.tight_layout(); plt.show()
+
 print("Utilidades listas")''')
 
 
@@ -322,21 +364,21 @@ final convierte eso en una probabilidad por clase.
 | Clasificador | `Dense(64)` + `Dropout` | combina las características; el dropout evita sobreajuste |
 | Salida | `Dense(softmax)` | una probabilidad por clase (5 flores) |
 
-La mostramos tal cual (es **la misma función** que usa el job, importada del repo):""")
-code('''# Importamos la arquitectura REAL del job (cloud/entrenamiento/train.py) y la enseñamos
-import sys
+Veamos primero **cómo se construye**, capa a capa. Es **la misma función** que usa el job (la
+importamos del repo y enseñamos su código tal cual, sin copiar nada):""")
+code('''# Importamos la arquitectura REAL del job y mostramos su código de construcción
+import sys, inspect
 sys.path.insert(0, "cloud/entrenamiento")
 from train import construir_modelo
 
-modelo_demo = construir_modelo(n_clases=5, img=128)
+print(inspect.getsource(construir_modelo))''')
+md("La instanciamos (5 clases, 128×128) y miramos su resumen — capas, formas y nº de parámetros:")
+code('''modelo_demo = construir_modelo(n_clases=5, img=128)
 modelo_demo.summary()''')
-md("Y el mismo modelo como diagrama, para verlo de un vistazo:")
-code('''# Diagrama del modelo (si faltara graphviz, no pasa nada: arriba ya tienes el summary)
-try:
-    from tensorflow.keras.utils import plot_model
-    display(plot_model(modelo_demo, show_shapes=True, show_layer_names=False, dpi=60))
-except Exception as e:
-    print("No se pudo dibujar el diagrama (", e, ") -- usa el summary de arriba")''')
+md("""Y en **3D**, para verlo de un vistazo: cada bloque es el volumen de datos que sale de esa capa.
+Se ve el embudo típico de una CNN — el **mapa espacial encoge** (128→63→30→14) mientras la
+**profundidad de canales crece** (3→32→64), hasta que el clasificador lo reduce a 5 probabilidades.""")
+code('''dibujar_cnn_3d(modelo_demo)''')
 
 md("""### Lanzar el entrenamiento
 
