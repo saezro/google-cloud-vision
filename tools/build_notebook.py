@@ -68,8 +68,6 @@ md("""**El resto de la config se deriva del proyecto** (bucket, service account,
 falta tocar nada; si quisieras, es aquí.""")
 code('''PROJECT       = _dd.value                               # el que elegiste arriba
 REGION        = "europe-west4"                           # región con GPU L4 (bucket + Cloud Run)
-EPOCHS        = 15                                       # pocas épocas: en GPU entrena en ~3-4 min
-IMG_SIZE      = 180                                      # lado de la imagen de entrada de la CNN
 BUCKET        = f"{PROJECT}-imagenes"                    # nombre del bucket (único por proyecto)
 
 MODEL_DIR     = "models/flores102"                       # tu CNN entrenada (carpeta en el bucket)
@@ -279,6 +277,37 @@ def dibujar_arquitectura():
             ha="center", va="center", fontsize=9, style="italic", color="#666")
     plt.tight_layout(); plt.show()
 
+def coste_estimado():
+    """ESTIMACIÓN de lo que ha costado la demo (NO es la factura real). El grueso es el job en GPU;
+    el storage es céntimos y el service escala a 0. Precios públicos aproximados de europe-west4 (USD).
+    La factura exacta sale en la consola de Facturación, con horas de retraso."""
+    from datetime import datetime
+    P_GPU, P_VCPU, P_MEM, P_STORE_MES = 0.000233, 0.0000240, 0.0000025, 0.020  # $/s y $/GiB·mes
+    mem_gib = int("".join(ch for ch in MEMORY if ch.isdigit()))                # "16Gi" -> 16
+    filas = []
+    # 1) Job: sumar la duración de TODAS las ejecuciones (incluidas las fallidas, también cuestan)
+    out = subprocess.run(["gcloud", "run", "jobs", "executions", "list", "--job", JOB,
+        "--region", REGION, "--format=value(status.startTime,status.completionTime)"],
+        capture_output=True, text=True).stdout.strip().splitlines()
+    seg, n = 0.0, 0
+    for ln in out:
+        p = ln.split()
+        if len(p) == 2:
+            t0 = datetime.fromisoformat(p[0].replace("Z", "+00:00"))
+            t1 = datetime.fromisoformat(p[1].replace("Z", "+00:00"))
+            seg += max((t1 - t0).total_seconds(), 0); n += 1
+    c_job = seg * (P_GPU + CPU * P_VCPU + mem_gib * P_MEM)
+    filas.append(("Job entrenamiento (GPU L4)", f"{seg/60:.1f} min · {n} ejec.", round(c_job, 3)))
+    # 2) Storage del bucket (prorrateado ~1 día)
+    gib = sum((b.size or 0) for b in _sc.list_blobs(BUCKET)) / (1024**3)
+    filas.append(("Storage (bucket, ~1 día)", f"{gib:.2f} GiB", round(gib * P_STORE_MES / 30, 3)))
+    # 3) Service: escala a 0, solo ms por petición -> despreciable
+    filas.append(("Service inferencia (GPU, escala a 0)", "~ms/petición", 0.0))
+    df = pd.DataFrame(filas, columns=["recurso", "uso", "coste_usd_aprox"])
+    print("ESTIMACIÓN (no es la factura real; precios aprox. europe-west4, USD)")
+    print(f"TOTAL ESTIMADO ≈ ${df['coste_usd_aprox'].sum():.2f}")
+    return df
+
 print("Utilidades listas")''')
 
 
@@ -383,6 +412,14 @@ md("""## Paso 5 · Entrenar tu propia CNN desde cero en Cloud Run (job, con GPU)
 El corazón del taller: **entrenamos una CNN desde cero** sobre **Oxford Flowers 102** (102 clases de
 flor, ~8.000 imágenes), en una **GPU NVIDIA L4**. Antes de lanzarlo, veamos **qué** vamos a entrenar.""")
 
+md("""### Hiperparámetros del entrenamiento
+
+Estos son los mandos del entrenamiento. Cámbialos aquí (es lo que define cómo y cuánto entrena):
+- `EPOCHS`: cuántas pasadas al dataset. Más = mejor (hasta cierto punto) pero más lento.
+- `IMG_SIZE`: a qué tamaño se redimensiona cada imagen de entrada de la CNN.""")
+code('''EPOCHS   = 15    # épocas (en GPU L4, ~14 s/época → ~3-4 min con 15)
+IMG_SIZE = 180   # lado de la imagen de entrada (px)''')
+
 md("""### La arquitectura de la CNN
 
 La red que entrenamos (la teoría de conv/pool/dropout, en las slides). Mostramos **su código real**,
@@ -393,8 +430,8 @@ sys.path.insert(0, "cloud/entrenamiento")
 from train import construir_modelo
 
 print(inspect.getsource(construir_modelo))''')
-md("La instanciamos (102 clases, 180×180) y miramos su resumen — capas, formas y nº de parámetros:")
-code('''modelo_demo = construir_modelo(n_clases=102, img=180)
+md("La instanciamos (102 clases, `IMG_SIZE`×`IMG_SIZE`) y miramos su resumen — capas, formas y nº de parámetros:")
+code('''modelo_demo = construir_modelo(n_clases=102, img=IMG_SIZE)
 modelo_demo.summary()''')
 md("""Y en **3D interactivo** (gíralo y haz zoom con el ratón para ver los ángulos): cada bloque es el
 volumen de datos que sale de esa capa. El embudo típico de una CNN — el **mapa espacial encoge**
@@ -530,9 +567,13 @@ md("""Las ideas que se llevan a casa:
 
 Las dos GPU solo están encendidas cuando hacen falta: el **job** los minutos que entrena, el
 **service** solo mientras atiende peticiones. **El service se deja en `--min-instances 0` también para
-la charla**: la primera inferencia paga ~5 s de arranque y ya; así una GPU parada nunca cobra.
+la charla**: la primera inferencia paga ~5 s de arranque y ya; así una GPU parada nunca cobra.""")
+md("""### ¿Cuánto ha costado todo esto?
 
-**Limpieza** (se lleva por delante todo lo creado, incluido cualquier resto que cobre):
+Una **estimación** de lo gastado (job en GPU + storage; el service escala a 0). No es la factura real
+—esa sale en la consola de Facturación con horas de retraso— pero da el orden de magnitud al momento:""")
+code('''coste_estimado()''')
+md("""**Limpieza** (se lleva por delante todo lo creado, incluido cualquier resto que cobre):
 
 ```
 !gcloud projects delete {PROJECT}
