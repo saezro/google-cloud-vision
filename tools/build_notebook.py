@@ -332,9 +332,20 @@ md("""## Paso 4 · Cloud Storage — crear el bucket y subir las imágenes
 
 El **bucket** es el almacén (imágenes ahora, modelos después). Lo creamos y subimos las fotos de
 prueba del repo.""")
-code('''# Crear el bucket (idempotente: si ya estaba, no pasa nada)
-!gcloud storage buckets create gs://{BUCKET} \\
-  --location={REGION} --uniform-bucket-level-access -q || echo "(ya existía)"''')
+code('''# Crear el bucket (idempotente). Si ya existía -> mensaje en verde, sin error rojo.
+import subprocess
+def _gc(*args):
+    return subprocess.run(["gcloud", *args], capture_output=True, text=True)
+
+VERDE, ROJO, FIN = "\\033[92m", "\\033[91m", "\\033[0m"
+_r = _gc("storage", "buckets", "create", f"gs://{BUCKET}",
+         f"--location={REGION}", "--uniform-bucket-level-access", "-q")
+if _r.returncode == 0:
+    print(f"{VERDE}✓ Bucket creado: gs://{BUCKET}{FIN}")
+elif _gc("storage", "buckets", "describe", f"gs://{BUCKET}", "--format=value(name)").returncode == 0:
+    print(f"{VERDE}✓ El bucket ya estaba creado: gs://{BUCKET}{FIN}")
+else:
+    print(f"{ROJO}✗ Error creando el bucket:{FIN}\\n{_r.stderr.strip()}")''')
 code('''# Subir las imágenes de prueba del repo (carpeta imagenes/) a gs://BUCKET/demo/
 import glob
 for ruta in sorted(glob.glob("imagenes/*.jpg")):
