@@ -265,6 +265,55 @@ def dibujar_cnn_3d(model):
               loc="upper center", ncol=5, fontsize=8, frameon=False, bbox_to_anchor=(0.5, 0.02))
     plt.tight_layout(); plt.show()
 
+def dibujar_arquitectura():
+    """Mapa de TODO el taller: qué hace cada parte y DÓNDE corre (Colab vs tu proyecto GCP)."""
+    from matplotlib.patches import FancyBboxPatch, FancyArrowPatch
+    fig, ax = plt.subplots(figsize=(13, 7.8)); ax.set_xlim(0, 100); ax.set_ylim(0, 100); ax.axis("off")
+    AZUL, VERDE, NARANJA, GRIS, MORADO = "#4C72B0", "#55A868", "#DD8452", "#7F7F7F", "#8172B3"
+
+    def caja(x, y, w, h, color, titulo, lineas, fc=None, tfs=11):
+        ax.add_patch(FancyBboxPatch((x, y), w, h, boxstyle="round,pad=0.4,rounding_size=2",
+                     linewidth=2, edgecolor=color, facecolor=fc or "white", alpha=0.95))
+        ax.text(x+w/2, y+h-4, titulo, ha="center", va="top", fontsize=tfs, fontweight="bold", color=color)
+        for i, ln in enumerate(lineas):
+            ax.text(x+3, y+h-11-i*4.4, ln, ha="left", va="top", fontsize=8.3, color="#222")
+
+    def flecha(x1, y1, x2, y2, txt="", color="#444", rad=0.0, lpos=None, astyle="-|>"):
+        ax.add_patch(FancyArrowPatch((x1, y1), (x2, y2), arrowstyle=astyle, mutation_scale=15,
+                     lw=1.7, color=color, connectionstyle=f"arc3,rad={rad}"))
+        if txt:
+            lx, ly = lpos or ((x1+x2)/2, (y1+y2)/2+1.5)
+            ax.text(lx, ly, txt, ha="center", va="bottom", fontsize=7.6, color=color, style="italic")
+
+    ax.add_patch(FancyBboxPatch((34, 5), 64, 90, boxstyle="round,pad=0.5,rounding_size=3",
+                 linewidth=2, edgecolor="#999", facecolor="#F4F6F8", alpha=0.6, linestyle="--"))
+    ax.text(66, 92, "TU PROYECTO DE GOOGLE CLOUD  ·  aquí corre lo pesado", ha="center",
+            va="center", fontsize=11, fontweight="bold", color="#666")
+
+    caja(1.5, 14, 28, 64, GRIS, "COLAB · el mando",
+         ["0 · git clone (trae el código)", "1 · login + elegir proyecto",
+          "2 · activar APIs", "3 · crear IAM", "4 · subir imágenes",
+          "5 · lanzar el job", "7 · desplegar el service", "8 · pedir inferencias",
+          "9 · inventario de modelos"], fc="#F0F0F0")
+    caja(40, 58, 54, 22, AZUL, "Cloud Storage · bucket",
+         ["demo/                 imágenes de prueba", "models/flores         tu CNN entrenada",
+          "models/imagenet   MobileNet descargado"], fc="#EAF0F7")
+    caja(40, 31, 25, 18, VERDE, "Cloud Run JOB", ["entrena la CNN", "(arranca y muere)"], fc="#EAF3EE")
+    caja(69, 31, 25, 18, NARANJA, "Cloud Run SERVICE", ["sirve cualquier", "modelo (HTTP)"], fc="#FBEFE6")
+    caja(40, 9, 54, 13, MORADO, "IAM + Cloud Build",
+         ["SA de runtime · construye y despliega los contenedores"], fc="#F0EDF6")
+
+    flecha(29.5, 60, 40, 67, "sube imágenes", AZUL, 0.12, lpos=(34, 66))
+    flecha(29.5, 50, 40, 40, "deploy + execute", VERDE, 0.05, lpos=(34.5, 47))
+    flecha(53, 49, 58, 58, "guarda modelo", VERDE, -0.2, lpos=(49, 53))
+    flecha(76, 58, 81, 49, "carga modelo", NARANJA, -0.2, lpos=(85, 53))
+    flecha(69, 34, 29.5, 41, "pide inferencia  ·  recibe predicción", NARANJA, -0.3,
+           lpos=(49, 24.5), astyle="<|-|>")
+
+    ax.text(66, 2.3, "Colab no es Google Cloud: solo da órdenes. Si cierras Colab, lo de Cloud Run sigue vivo.",
+            ha="center", va="center", fontsize=9, style="italic", color="#666")
+    plt.tight_layout(); plt.show()
+
 print("Utilidades listas")''')
 
 
@@ -488,19 +537,18 @@ clasificar(IMG, modelo=ruta)''')
 # ============================================================ 10 · CIERRE
 md("""## Paso 10 · Repaso, costes y limpieza
 
-Lo que has montado, de punta a punta y **todo en tu proyecto**:
+Este es el mapa de **todo lo que hemos hecho y dónde ha ocurrido cada cosa** — Colab solo daba
+órdenes; lo pesado vivió siempre en tu proyecto de Google Cloud:""")
+code('''dibujar_arquitectura()''')
+md("""Las ideas que se llevan a casa:
 
-```
-                                 ┌─ tu CNN (la entrenaste con el JOB)
-imágenes (bucket) ─► SERVICE ─┤                                  ─► inferencia
-                                 └─ MobileNet (pre-entrenado, descargado)
-```
-
-Dos modelos, **un mismo service** en tu Cloud Run. La diferencia con la Vision API: aquí **todo corre
-en tu infraestructura**, lo entrenes tú o lo descargues hecho.
-
-Y la distinción del principio, ya en práctica: **JOB** para entrenar (empieza, entrena, termina),
-**SERVICE** para servir (siempre listo para responder).
+- **Colab ≠ Google Cloud.** Colab fue el mando; el cómputo y lo que persiste vive en GCP.
+- **JOB vs SERVICE.** El **job** entrena y muere; el **service** queda sirviendo. Misma plataforma
+  (Cloud Run), dos modos para dos necesidades.
+- **El bucket lo une todo:** imágenes de entrada, modelos de salida, y el "registro" de modelos.
+- **La infra de servir es agnóstica al modelo:** el mismo service sirvió tu CNN y MobileNet. Lo
+  entrenes tú o lo descargues hecho, **corre en tu infraestructura** (esa es la diferencia con una
+  API gestionada como Vision).
 
 **Costes:** con `--min-instances 0` el service no cuesta nada en reposo; el job solo cuesta mientras
 entrena. Todo es **CPU, sin GPU**.
