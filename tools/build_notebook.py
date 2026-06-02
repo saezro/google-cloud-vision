@@ -187,14 +187,13 @@ def registro_modelos():
     return pd.DataFrame(filas).sort_values("modelo").reset_index(drop=True)
 
 def dibujar_cnn_3d(model):
-    """Dibuja las capas conv/pool como volúmenes 3D apilados (alto×ancho = mapa espacial,
-    grosor = nº de canales). El diagrama clásico de una CNN: el mapa encoge, la profundidad crece."""
-    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-    from matplotlib.patches import Patch
+    """CNN en 3D **interactivo** (gíralo y haz zoom con el ratón). Cada bloque es el volumen de datos
+    que sale de esa capa: alto×ancho = mapa espacial, grosor = nº de canales."""
+    import plotly.graph_objects as go
     colores = {"Entrada": "#9AA7B0", "Conv2D": "#4C72B0", "MaxPooling2D": "#55A868",
                "GlobalAveragePooling2D": "#8172B3", "Dense": "#DD8452"}
     # caja de entrada + solo las capas que cambian de forma (saltamos normalizado y aumento de datos)
-    e = tuple(model.layers[0].output.shape)  # forma de entrada (salida del Rescaling)
+    e = tuple(model.layers[0].output.shape)
     cajas = [("Entrada", e[1], e[2], e[3], f"{e[1]}×{e[2]}×{e[3]}")]
     for L in model.layers:
         n = L.__class__.__name__
@@ -205,28 +204,31 @@ def dibujar_cnn_3d(model):
             _, h, w, c = s; cajas.append((n, h, w, c, f"{h}×{w}×{c}"))
         else:
             _, u = s; cajas.append((n, max(u/8, 2), max(u/8, 2), u, f"{u}"))
-    fig = plt.figure(figsize=(15, 5.5))
-    ax = fig.add_subplot(111, projection="3d")
-    x = 0.0
-    for i, (nombre, h, w, c, etiq) in enumerate(cajas):
-        dy, dz = w / 8.0, h / 8.0
-        dx = max(c / 16.0, 0.3)
-        col = colores.get(nombre, "#BBBBBB")
-        x0, y0, z0 = x, -dy / 2, -dz / 2
-        v = np.array([[x0,y0,z0],[x0+dx,y0,z0],[x0+dx,y0+dy,z0],[x0,y0+dy,z0],
-                      [x0,y0,z0+dz],[x0+dx,y0,z0+dz],[x0+dx,y0+dy,z0+dz],[x0,y0+dy,z0+dz]])
-        caras = [[v[0],v[1],v[2],v[3]],[v[4],v[5],v[6],v[7]],[v[0],v[1],v[5],v[4]],
-                 [v[2],v[3],v[7],v[6]],[v[1],v[2],v[6],v[5]],[v[0],v[3],v[7],v[4]]]
-        ax.add_collection3d(Poly3DCollection(caras, facecolor=col, edgecolor="white",
-                                             linewidths=0.4, alpha=0.92))
-        z_lab = dz/2 + (1.2 if i % 2 == 0 else 3.6)   # alternar altura para no solapar
-        ax.text(x0+dx/2, 0, z_lab, etiq, ha="center", va="bottom", fontsize=8)
-        x += dx + 3.0
-    ax.set_xlim(0, x); ax.set_ylim(-9, 9); ax.set_zlim(-9, 11)
-    ax.set_axis_off(); ax.view_init(elev=18, azim=-68)
-    ax.legend(handles=[Patch(facecolor=c, label=n) for n, c in colores.items()],
-              loc="upper center", ncol=5, fontsize=8, frameon=False, bbox_to_anchor=(0.5, 0.02))
-    plt.tight_layout(); plt.show()
+    # triangulación de un cubo (vértices unitarios -> 12 triángulos)
+    Vx = [0,0,1,1,0,0,1,1]; Vy = [0,1,1,0,0,1,1,0]; Vz = [0,0,0,0,1,1,1,1]
+    I = [7,0,0,0,4,4,6,6,4,0,3,2]; J = [3,4,1,2,5,6,5,2,0,1,6,3]; K = [0,7,2,3,6,7,1,1,5,5,7,6]
+    fig = go.Figure(); x = 0.0; lx, ly, lz, lt = [], [], [], []; vistos = set()
+    for nombre, h, w, c, etiq in cajas:
+        dy, dz = w/8.0, h/8.0; dx = max(c/16.0, 0.3)
+        X = [x + dx*t for t in Vx]
+        Y = [-dy/2 + dy*t for t in Vy]
+        Z = [-dz/2 + dz*t for t in Vz]
+        fig.add_trace(go.Mesh3d(x=X, y=Y, z=Z, i=I, j=J, k=K, color=colores.get(nombre, "#BBB"),
+                                opacity=0.92, flatshading=True, name=nombre, legendgroup=nombre,
+                                showlegend=(nombre not in vistos),
+                                hovertext=f"{nombre}: {etiq}", hoverinfo="text"))
+        vistos.add(nombre)
+        lx.append(x + dx/2); ly.append(0); lz.append(dz/2 + 1.0); lt.append(etiq)
+        x += dx + 2.5
+    fig.add_trace(go.Scatter3d(x=lx, y=ly, z=lz, mode="text", text=lt, showlegend=False,
+                               textposition="top center", textfont=dict(size=11)))
+    fig.update_layout(title="Arquitectura de la CNN — gírala con el ratón",
+                      height=540, margin=dict(l=0, r=0, t=40, b=0),
+                      legend=dict(orientation="h", y=0),
+                      scene=dict(xaxis=dict(visible=False), yaxis=dict(visible=False),
+                                 zaxis=dict(visible=False), aspectmode="data",
+                                 camera=dict(eye=dict(x=1.5, y=-1.7, z=0.7))))
+    fig.show()
 
 def dibujar_arquitectura():
     """Mapa de TODO el taller: qué hace cada parte y DÓNDE corre (Colab vs tu proyecto GCP)."""
@@ -394,9 +396,10 @@ print(inspect.getsource(construir_modelo))''')
 md("La instanciamos (102 clases, 180×180) y miramos su resumen — capas, formas y nº de parámetros:")
 code('''modelo_demo = construir_modelo(n_clases=102, img=180)
 modelo_demo.summary()''')
-md("""Y en **3D**, para verlo de un vistazo: cada bloque es el volumen de datos que sale de esa capa.
-El embudo típico de una CNN — el **mapa espacial encoge** mientras la **profundidad de canales crece**
-(32→64→128→256), hasta que el clasificador lo reduce a 102 probabilidades.""")
+md("""Y en **3D interactivo** (gíralo y haz zoom con el ratón para ver los ángulos): cada bloque es el
+volumen de datos que sale de esa capa. El embudo típico de una CNN — el **mapa espacial encoge**
+mientras la **profundidad de canales crece** (32→64→128→256), hasta que el clasificador lo reduce a
+102 probabilidades.""")
 code('''dibujar_cnn_3d(modelo_demo)''')
 
 md("""> El resto del entrenamiento (cargar Flores-102, el bucle de entreno, guardar el modelo) vive en
@@ -436,8 +439,8 @@ Creamos un **service con GPU** (`--gpu 1 --gpu-type nvidia-l4`) **desde la image
 
 > **Coste — el apagado automático es CLAVE con GPU.** Va con `--min-instances 0`: cuando nadie lo usa,
 > Cloud Run **apaga la instancia y deja de cobrar la GPU**. Sin esto, una GPU encendida cuesta cada
-> hora. La primera petición tras un rato paga un **arranque en frío** (la imagen CUDA + cargar el
-> modelo, ~1 min). Para la charla: `--min-instances 1` ese rato (sin cold start), y a **0 al acabar**.
+> hora. **Lo dejamos en 0 también para la charla**: la primera inferencia paga un **arranque en frío**
+> de ~5 s (cargar el modelo en GPU) y las siguientes van a milisegundos. Así no pagas GPU parada.
 > `--max-instances` pone un techo de gasto.
 >
 > Queda **privado** (la org bloquea el acceso público): se llama con un id-token, lo hace
@@ -526,8 +529,8 @@ md("""Las ideas que se llevan a casa:
 | **Bucket** | Céntimos. | Almacenamiento de imágenes y modelos. |
 
 Las dos GPU solo están encendidas cuando hacen falta: el **job** los minutos que entrena, el
-**service** solo mientras atiende peticiones. Para la charla: `--min-instances 1` en el service ese
-rato (sin cold start), y **a 0 al acabar** — si no, una GPU parada sigue cobrando.
+**service** solo mientras atiende peticiones. **El service se deja en `--min-instances 0` también para
+la charla**: la primera inferencia paga ~5 s de arranque y ya; así una GPU parada nunca cobra.
 
 **Limpieza** (se lleva por delante todo lo creado, incluido cualquier resto que cobre):
 

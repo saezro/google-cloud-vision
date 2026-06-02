@@ -189,8 +189,9 @@ gcloud run deploy taller-inferencia-flores --source . \
 
 - **Variables de entorno** = el código no "descubre" nada en caliente; lo lee al arrancar → más
   rápido y reproducible.
-- **`--min-instances 1`** en el servicio: una instancia siempre caliente → **sin cold start** ni
-  esperas de carga del modelo en la demo (el modelo se pre-carga al arrancar).
+- **`--min-instances 0`** en el servicio (también en la demo): **se apaga solo** y no cobra la GPU en
+  reposo. La primera inferencia paga ~5 s de arranque (cargar el modelo en GPU) y las siguientes van a
+  milisegundos. Evita pagar una GPU L4 parada.
 
 ### 5.1 · Detalle real: la org bloqueó el acceso público (gran ejemplo de IAM)
 

@@ -80,8 +80,9 @@ Poco, y acotado (entreno e inferencia van en **GPU**, así que el apagado autom�
 - **Service (GPU L4)** — con `--min-instances 0` se **apaga solo** cuando nadie lo usa; la GPU deja de cobrar en reposo.
 - **Bucket** — céntimos.
 
-Ninguna GPU se queda encendida sola: el job muere al acabar y el service escala a 0. Para la charla,
-sube el service a `--min-instances 1` ese rato (sin arranque en frío) y bájalo a 0 al terminar.
+Ninguna GPU se queda encendida sola: el job muere al acabar y el service escala a 0. **También en la
+charla se deja `--min-instances 0`**: la primera inferencia paga ~5 s de arranque y las siguientes van
+a milisegundos, sin pagar una GPU parada.
 
 ## Para limpiar
 
