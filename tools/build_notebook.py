@@ -19,12 +19,15 @@ def code(s):
                   "outputs": [], "source": s.rstrip("\n").splitlines(keepends=True)})
 
 # ============================================================ PORTADA
-md("""# Google Cloud Vision — de una foto a una decisión
+md("""# Entrenar y servir tu propio modelo en Google Cloud
 
-Dos formas de convertir una imagen en algo útil, una al lado de la otra:
+De un dataset de imágenes a un modelo en producción, **todo en tu nube**:
 
-1. **Vision API** — visión por computador ya hecha (etiquetas, objetos, texto). No entrenas nada.
-2. **Una CNN tuya** — cuando las clases son tuyas: la entrenas y la sirves como una API, todo en **Cloud Run**.
+1. **Entrenas** una CNN desde cero con tus propias clases, en un **job de Cloud Run**.
+2. La **sirves** como una API en un **service de Cloud Run** y haces inferencia sobre fotos nuevas.
+
+El modelo es **tuyo** y corre en **tu** infraestructura: tú lo entrenas, tú lo despliegas, tú lo
+llamas. Nada pre-hecho ni externo.
 
 **Cómo va el cuaderno:** dale al play de arriba a abajo. Cada sección explica *qué* hace y *por qué*.
 Casi todo es idempotente —si algo ya existe, no rompe—, así que puedes re-ejecutar sin miedo.""")
@@ -36,7 +39,7 @@ Es el malentendido número uno, así que vamos claros:
 | Dónde corre | Qué hace |
 |---|---|
 | **Este Colab** (una máquina de Google, *fuera* de tu proyecto) | el **mando**: te autentica, lanza comandos `gcloud`, enseña imágenes y gráficas, llama a los endpoints |
-| **Tu proyecto de Google Cloud** | **lo pesado y lo que persiste**: Storage, Vision, **Cloud Run** (entrena y sirve el modelo) |
+| **Tu proyecto de Google Cloud** | **lo pesado y lo que persiste**: Storage, **Cloud Run** (entrena y sirve el modelo) |
 
 Consecuencias prácticas: lo que hace este Colab **no** aparece en tu factura de GCP, **no** hay
 ninguna VM ni Compute Engine de por medio, y si cierras la pestaña, lo que dejaste en Cloud Run
@@ -45,6 +48,43 @@ ninguna VM ni Compute Engine de por medio, y si cierras la pestaña, lo que deja
 **Lo único que damos por hecho:** que ya tienes un **proyecto** de Google Cloud con **billing**
 activado (eso se hace una vez, con un par de clics, en la consola web). Todo lo demás lo montamos
 aquí, paso a paso.""")
+
+# ============================================================ CONCEPTOS
+md("""## Conceptos · las piezas de Google Cloud que vamos a usar
+
+Antes de tocar nada, el mapa. Todo en GCP cuelga de un **proyecto** (la unidad de facturación y de
+permisos). Dentro vamos a usar cinco piezas:
+
+**1 · Cloud Storage — el almacén.** Guardas ficheros (imágenes, el modelo entrenado…) en **buckets**.
+Cada objeto tiene una URI tipo `gs://mi-bucket/carpeta/archivo.jpg`. Es el disco compartido al que
+todo lo demás se conecta.
+
+**2 · IAM — quién puede hacer qué.** La regla de oro: **una identidad** tiene **un rol** sobre **un
+recurso**. Una identidad puede ser una persona o una **service account** (una "cuenta de robot" con la
+que corren los programas, sin contraseñas). En el taller creamos una service account para que nuestros
+contenedores tengan permiso de leer/escribir en el bucket.
+
+**3 · Cloud Build + Artifact Registry — construir el contenedor.** Tú entregas tu código y un
+`Dockerfile`; Cloud Build lo empaqueta en una **imagen de contenedor** y la guarda en Artifact
+Registry. Esa imagen es lo que Cloud Run ejecuta.
+
+**4 · Cloud Run — donde corre tu código.** Ejecuta contenedores sin que gestiones servidores. Y aquí
+está la distinción clave del taller: Cloud Run tiene **dos formas** de correr algo.""")
+
+md("""### Cloud Run JOB vs SERVICE — la diferencia que hay que tener clara
+
+| | **Job** (tarea) | **Service** (servicio) |
+|---|---|---|
+| Qué es | un contenedor que **arranca, hace una tarea y muere** | un contenedor que **se queda escuchando** peticiones HTTP |
+| Vive | mientras dura el trabajo, luego se apaga | siempre disponible (escala a 0 cuando nadie lo usa) |
+| Cómo se invoca | lo **ejecutas** (`jobs execute`) | le **mandas peticiones** (HTTP a su URL) |
+| Para qué, aquí | **entrenar** el modelo (empieza, entrena, termina) | **servir** el modelo (responde a cada inferencia) |
+| Analogía | un horno: lo enciendes, cocina, se apaga | un restaurante: abierto, atiende cuando llega gente |
+
+Es el eje del taller: **entrenas con un JOB** (Paso 5) y **sirves con un SERVICE** (Pasos 7-8). Mismo
+Cloud Run, dos modos para dos necesidades distintas.
+
+Con el mapa claro, vamos a montarlo.""")
 
 # ============================================================ TRAER EL REPO
 md("""## Paso 0 · Traer el código
@@ -79,15 +119,19 @@ md("""### El resto de la config se deriva sola
 
 A partir del proyecto que elegiste, se calculan el nombre del bucket, la cuenta de servicio, los
 nombres del job y del service, etc. No hace falta tocar nada; si quisieras, aquí es donde lo harías.""")
-code('''PROJECT    = _dd.value                                  # el que elegiste arriba
-REGION     = "europe-southwest1"                        # región de todo (bucket, Cloud Run)
-EPOCHS     = 8                                          # épocas de entrenamiento de la CNN
-BUCKET     = f"{PROJECT}-imagenes"                      # nombre del bucket (único por proyecto)
-MODEL_DIR  = "models/flores"                            # carpeta del modelo dentro del bucket
-MODEL_GCS  = f"gs://{BUCKET}/{MODEL_DIR}"               # URI completa del modelo
+code('''PROJECT       = _dd.value                               # el que elegiste arriba
+REGION        = "europe-southwest1"                     # región de todo (bucket, Cloud Run)
+EPOCHS        = 8                                        # épocas de entrenamiento de la CNN
+BUCKET        = f"{PROJECT}-imagenes"                    # nombre del bucket (único por proyecto)
+
+MODEL_DIR     = "models/flores"                          # tu CNN entrenada (carpeta en el bucket)
+MODEL_GCS     = f"gs://{BUCKET}/{MODEL_DIR}"             # URI de tu modelo
+PRETRAIN_DIR  = "models/imagenet"                        # modelo pre-entrenado (lo descargamos)
+PRETRAIN_GCS  = f"gs://{BUCKET}/{PRETRAIN_DIR}"          # URI del modelo pre-entrenado
+
 RUNTIME_SA = f"taller-vision-sa@{PROJECT}.iam.gserviceaccount.com"  # SA con la que corre todo
 JOB        = "taller-entrenar-flores"                   # Cloud Run job (entrena)
-SERVICE    = "taller-inferencia-flores"                 # Cloud Run service (sirve)
+SERVICE    = "taller-inferencia-flores"                 # Cloud Run service (sirve cualquier modelo)
 
 !gcloud config set project {PROJECT} -q
 print("Proyecto activo:", PROJECT)
@@ -96,16 +140,16 @@ print("Bucket:", BUCKET, "| región:", REGION)''')
 # ============================================================ UTILIDADES
 md("""## Utilidades
 
-Funciones de apoyo que usamos más abajo (mostrar imágenes, llamar a Vision, pintar gráficas, llamar
-al modelo). **No hace falta leerlo** para seguir el taller — ejecútala y a otra cosa.""")
+Funciones de apoyo que usamos más abajo (mostrar imágenes del bucket, esperar al entrenamiento,
+pintar las gráficas, llamar al modelo servido). **No hace falta leerlo** para seguir el taller —
+ejecútala y a otra cosa.""")
 code('''import io, json, time, subprocess
 import requests, numpy as np, matplotlib.pyplot as plt
 from PIL import Image
-!pip -q install google-cloud-vision google-cloud-storage
-from google.cloud import storage, vision
+!pip -q install google-cloud-storage
+from google.cloud import storage
 
 _sc  = storage.Client(project=PROJECT)
-_vis = vision.ImageAnnotatorClient(client_options={"quota_project_id": PROJECT})
 _bucket = lambda: _sc.bucket(BUCKET)
 
 def ver_bucket(prefix="demo/"):
@@ -118,25 +162,6 @@ def ver_bucket(prefix="demo/"):
         ax.set_title(b.name, fontsize=8)
     plt.show()
     return [f"gs://{BUCKET}/{b.name}" for b in blobs]
-
-def vision_analizar(uri):
-    """Pasa una imagen del bucket por Vision: etiquetas, objetos y OCR."""
-    img = vision.Image(source=vision.ImageSource(image_uri=uri))
-    labels = [(l.description, round(l.score*100, 1)) for l in _vis.label_detection(image=img, max_results=6).label_annotations]
-    objs   = [(o.name, round(o.score*100, 1)) for o in _vis.object_localization(image=img).localized_object_annotations]
-    t = _vis.text_detection(image=img).text_annotations
-    print("ETIQUETAS:", labels)
-    print("OBJETOS:  ", objs)
-    print("OCR:      ", (t[0].description.strip() if t else "(sin texto)"))
-    return {"labels": labels, "objetos": objs}
-
-def decision(uri):
-    """Aplica una regla de negocio sencilla sobre la respuesta de Vision: ACEPTAR / REVISAR."""
-    r = vision_analizar(uri)
-    flores = {"Flower", "Petal", "Plant", "Rose", "Sunflower", "Daisy", "Common sunflower"}
-    v = "ACEPTAR" if any(t in flores for t, _ in r["labels"]) else "REVISAR"
-    print("-> veredicto:", v)
-    return v
 
 def esperar_modelo():
     """Bloquea hasta que el job de entrenamiento haya dejado el modelo en el bucket."""
@@ -161,12 +186,18 @@ def _service_url():
     return subprocess.run(["gcloud", "run", "services", "describe", SERVICE, "--region", REGION,
                            "--format=value(status.url)"], capture_output=True, text=True).stdout.strip()
 
-def clasificar(uri):
-    """Llama al modelo servido en Cloud Run (privado: se llama con id-token)."""
+def clasificar(uri, modelo=None):
+    """Llama al modelo servido en Cloud Run. `modelo` elige cuál (por defecto, el del service).
+
+    El service es agnóstico al modelo: si le pasas `model_gcs`, sirve ese. Así el MISMO
+    endpoint clasifica con tu CNN o con el modelo pre-entrenado, según a cuál apuntes."""
     tok = subprocess.run(["gcloud", "auth", "print-identity-token"], capture_output=True, text=True).stdout.strip()
-    d = requests.post(f"{_service_url()}/predict", json={"image_gcs": uri},
-                      headers={"Authorization": f"Bearer {tok}"}, timeout=120).json()
-    print(f"{uri}\\n   -> {d['prediccion']}  ({d['confianza']}%)")
+    payload = {"image_gcs": uri}
+    if modelo:
+        payload["model_gcs"] = modelo
+    d = requests.post(f"{_service_url()}/predict", json=payload,
+                      headers={"Authorization": f"Bearer {tok}"}, timeout=180).json()
+    print(f"{uri}\\n   -> {d['prediccion']}  ({d['confianza']}%)   top: {[r['clase'] for r in d['ranking']]}")
     return d
 
 print("Utilidades listas")''')
@@ -175,10 +206,10 @@ print("Utilidades listas")''')
 md("""## Paso 2 · Activar las APIs del proyecto
 
 En Google Cloud cada servicio se activa **por proyecto**. Encendemos los que vamos a usar de una vez:
-Storage (el bucket), Vision (la visión gestionada), Cloud Run + Cloud Build + Artifact Registry
-(construir y servir contenedores) e IAM (los permisos).""")
+Storage (el bucket), Cloud Run + Cloud Build + Artifact Registry (construir y servir contenedores) e
+IAM (los permisos).""")
 code('''!gcloud services enable \\
-  storage.googleapis.com vision.googleapis.com \\
+  storage.googleapis.com \\
   run.googleapis.com cloudbuild.googleapis.com \\
   artifactregistry.googleapis.com iam.googleapis.com -q
 print("APIs activadas")''')
@@ -265,11 +296,15 @@ code('''esperar_modelo()
 m = stats()''')
 
 # ============================================================ 7 · INFERIR
-md("""## Paso 7 · Servir el modelo en Cloud Run e inferir
+md("""## Paso 7 · Servir tu modelo en Cloud Run e inferir
 
 Ya tienes el modelo entrenado; ahora lo pones a trabajar. Desplegamos el otro tipo de Cloud Run: un
 **service** (siempre disponible, escala a 0 cuando no se usa) que carga el modelo desde el bucket y
 responde a peticiones. Se construye desde `cloud/inferencia/`.
+
+El service es **agnóstico al modelo**: carga el que le digas (`MODEL_GCS` por defecto, o el que pases
+en cada petición) y lee del `metrics.json` sus clases y su tamaño de entrada. Lo aprovecharemos en el
+Paso 8.
 
 > La organización bloquea el acceso público, así que el service queda **privado** y lo llamamos
 > autenticados con un id-token (lo hace `clasificar()` por dentro). Es, de hecho, la práctica
@@ -277,7 +312,7 @@ responde a peticiones. Se construye desde `cloud/inferencia/`.
 code('''%cd cloud/inferencia
 !gcloud run deploy {SERVICE} --source . --region {REGION} \\
   --service-account {RUNTIME_SA} \\
-  --cpu 2 --memory 4Gi --timeout 120 --min-instances 0 \\
+  --cpu 2 --memory 4Gi --timeout 180 --min-instances 0 \\
   --set-env-vars MODEL_GCS={MODEL_GCS} -q
 %cd ../..
 print("Service desplegado en:", _service_url())''')
@@ -286,35 +321,59 @@ code('''clasificar(IMG)
 clasificar(f"gs://{BUCKET}/demo/rosa.jpg")
 clasificar(f"gs://{BUCKET}/demo/margarita.jpg")''')
 
-# ============================================================ 8 · VISION (contraste, al final)
-md("""## Paso 8 · Y además: la Vision API (esto, pero ya hecho)
+# ============================================================ 8 · MODELO PRE-ENTRENADO
+md("""## Paso 8 · Servir un modelo pre-entrenado (sin entrenar nada)
 
-Acabas de **entrenar y servir** un modelo a mano. Conviene saber que, para clases **genéricas**,
-Google ya tiene un modelo entrenado y servido que usas como servicio: la **Vision API**. Le mandas
-una imagen y te devuelve etiquetas, objetos y texto (OCR) ya reconocidos — **tú no entrenas ni
-despliegas nada**.
+Entrenar está bien cuando las clases son tuyas, pero a veces quieres un modelo **grande y ya entrenado**
+sin gastar ni un minuto en entrenarlo. Aquí descargamos **MobileNetV2**, entrenado por Google con
+**ImageNet** (1000 clases), y lo servimos **en tu mismo Cloud Run** — ojo, esto es muy distinto de la
+Vision API: ahí el modelo corre en los servidores de Google; aquí el modelo es un fichero en **tu**
+bucket que sirve **tu** service.
 
-Lo probamos sobre la misma foto y le ponemos encima una **regla de negocio** trivial (¿hay una flor?
-→ ACEPTAR, si no → REVISAR), para ver el contraste con lo que construimos arriba:""")
-code('''decision(IMG)''')
-md("""**¿Cuándo cada uno?**
+La preparación (bajar el modelo y dejarlo servible) la hace Colab, igual que antes subía las imágenes.""")
+code('''# Descargar MobileNetV2 (ImageNet) y dejarlo servible en el bucket, como hizo el job con tu CNN
+import tensorflow as tf, json
 
-| | Vision API | Tu CNN en Cloud Run |
-|---|---|---|
-| Entrenamiento | ninguno | lo entrenas tú |
-| Clases | generales (las de Google) | **las tuyas** |
-| Puesta en marcha | inmediata | construir + desplegar |
-| Control | el que da la API | total |
+base = tf.keras.applications.MobileNetV2(weights="imagenet")   # 1000 clases, entrada 224x224
+inp  = tf.keras.Input(shape=(224, 224, 3))                     # el service le pasa RGB 0-255
+x    = tf.keras.layers.Rescaling(1/127.5, offset=-1)(inp)      # preprocesado de MobileNet, dentro del modelo
+servible = tf.keras.Model(inp, base(x))
+servible.export(f"{PRETRAIN_GCS}/saved_model")                 # SavedModel directo a gs://
 
-Regla práctica: si tus clases están entre las que Google ya reconoce, tira de **Vision API**; si son
-específicas de tu negocio (defectos, piezas, documentos tuyos…), no hay atajo: **modelo propio**,
-justo lo que montaste en los pasos 5-7.""")
+# etiquetas de ImageNet + tamaño de entrada -> metrics.json (lo lee el service, igual que el de flores)
+ruta = tf.keras.utils.get_file("imagenet_class_index.json",
+    "https://storage.googleapis.com/download.tensorflow.org/data/imagenet_class_index.json")
+idx = json.load(open(ruta))
+clases = [idx[str(i)][1] for i in range(1000)]
+with tf.io.gfile.GFile(f"{PRETRAIN_GCS}/metrics.json", "w") as f:
+    f.write(json.dumps({"classes": clases, "img_size": 224, "modelo": "MobileNetV2 (ImageNet)"}))
+print("Modelo pre-entrenado listo en", PRETRAIN_GCS)''')
+md("""Y ahora lo importante: **no desplegamos nada nuevo**. Llamamos al **mismo service** del Paso 7,
+pero apuntando al modelo pre-entrenado (`modelo=PRETRAIN_GCS`). La infra de servir es la misma; solo
+cambia el modelo.""")
+code('''clasificar(IMG, modelo=PRETRAIN_GCS)
+clasificar(f"gs://{BUCKET}/demo/rosa.jpg", modelo=PRETRAIN_GCS)
+clasificar(f"gs://{BUCKET}/demo/margarita.jpg", modelo=PRETRAIN_GCS)''')
 
 # ============================================================ 9 · CIERRE
-md("""## Paso 9 · Costes y limpieza
+md("""## Paso 9 · Repaso, costes y limpieza
+
+Lo que has montado, de punta a punta y **todo en tu proyecto**:
+
+```
+                                 ┌─ tu CNN (la entrenaste con el JOB)
+imágenes (bucket) ─► SERVICE ─┤                                  ─► inferencia
+                                 └─ MobileNet (pre-entrenado, descargado)
+```
+
+Dos modelos, **un mismo service** en tu Cloud Run. La diferencia con la Vision API: aquí **todo corre
+en tu infraestructura**, lo entrenes tú o lo descargues hecho.
+
+Y la distinción del principio, ya en práctica: **JOB** para entrenar (empieza, entrena, termina),
+**SERVICE** para servir (siempre listo para responder).
 
 **Costes:** con `--min-instances 0` el service no cuesta nada en reposo; el job solo cuesta mientras
-entrena; la Vision API regala 1.000 usos al mes. Todo es **CPU, sin GPU**.
+entrena. Todo es **CPU, sin GPU**.
 
 **Limpieza** (se lleva por delante todo lo creado):
 

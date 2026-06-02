@@ -1,7 +1,0 @@
-# Demo charla — De una imagen a un resultado de negocio (GCS + Vision)
-google-cloud-storage>=2.18
-google-cloud-vision>=3.7
-python-dotenv>=1.0
-pillow>=10.4
-# Opcional: app visual del bloque "resultado de negocio"
-streamlit>=1.38

@@ -29,14 +29,14 @@ from google.cloud import storage
 import tensorflow as tf
 
 MODEL_GCS = os.getenv("MODEL_GCS", "")  # gs://bucket/models/flores
-IMG = int(os.getenv("IMG_SIZE", "128"))
+IMG_DEFAULT = int(os.getenv("IMG_SIZE", "128"))  # fallback si el modelo no dice su tamaño
 PORT = int(os.getenv("PORT", "8080"))
 
 gcs = storage.Client()
-app = FastAPI(title="cnn-flores-inferencia", version="1")
+app = FastAPI(title="inferencia-cloud-run", version="2")
 
 _lock = threading.Lock()
-_state = {"model": None, "model_gcs": None, "classes": [], "load_ms": 0}
+_state = {"model": None, "model_gcs": None, "classes": [], "img_size": IMG_DEFAULT, "load_ms": 0}
 
 
 def _parse(uri):
@@ -52,21 +52,23 @@ def _load(model_gcs: str):
         t0 = time.time()
         # TF lee el SavedModel directo de gs://
         model = tf.saved_model.load(f"{model_gcs.rstrip('/')}/saved_model")
-        # clases desde metrics.json
-        classes = []
+        # clases y tamaño de entrada desde metrics.json (cada modelo trae el suyo)
+        classes, img_size = [], IMG_DEFAULT
         try:
             bk, prefix = _parse(model_gcs.rstrip("/") + "/metrics.json")
             blob = gcs.bucket(bk).blob(prefix)
             if blob.exists():
-                classes = json.loads(blob.download_as_bytes()).get("classes", [])
+                meta = json.loads(blob.download_as_bytes())
+                classes = meta.get("classes", [])
+                img_size = int(meta.get("img_size", IMG_DEFAULT))
         except Exception:  # noqa: BLE001
             pass
         _state.update({"model": model, "model_gcs": model_gcs, "classes": classes,
-                       "load_ms": int((time.time() - t0) * 1000)})
+                       "img_size": img_size, "load_ms": int((time.time() - t0) * 1000)})
         return _state
 
 
-def _leer_imagen(req) -> np.ndarray:
+def _leer_imagen(req, img_size: int) -> np.ndarray:
     if req.image_gcs:
         bk, blob = _parse(req.image_gcs)
         data = gcs.bucket(bk).blob(blob).download_as_bytes()
@@ -74,8 +76,8 @@ def _leer_imagen(req) -> np.ndarray:
         data = base64.b64decode(req.image_b64)
     else:
         raise HTTPException(400, "Pasa image_gcs o image_b64")
-    img = Image.open(io.BytesIO(data)).convert("RGB").resize((IMG, IMG))
-    return np.expand_dims(np.asarray(img, dtype=np.float32), 0)  # (1,IMG,IMG,3)
+    img = Image.open(io.BytesIO(data)).convert("RGB").resize((img_size, img_size))
+    return np.expand_dims(np.asarray(img, dtype=np.float32), 0)  # (1,img,img,3)
 
 
 class PredictReq(BaseModel):
@@ -93,7 +95,7 @@ def healthz():
 @app.get("/")
 def info():
     return {"model_gcs": _state["model_gcs"], "classes": _state["classes"],
-            "img_size": IMG, "load_ms": _state["load_ms"]}
+            "img_size": _state["img_size"], "load_ms": _state["load_ms"]}
 
 
 @app.post("/predict")
@@ -102,7 +104,7 @@ def predict(req: PredictReq):
     if not model_gcs:
         raise HTTPException(400, "No hay modelo: define MODEL_GCS o pásalo en model_gcs")
     st = _load(model_gcs)
-    x = _leer_imagen(req)
+    x = _leer_imagen(req, st["img_size"])
     t0 = time.time()
     infer = st["model"].signatures["serving_default"]
     out = infer(tf.constant(x))
@@ -111,7 +113,7 @@ def predict(req: PredictReq):
     ranking = sorted(
         ({"clase": classes[i], "prob": round(float(probs[i]) * 100, 1)}
          for i in range(len(probs))),
-        key=lambda d: d["prob"], reverse=True)
+        key=lambda d: d["prob"], reverse=True)[:5]  # top-5 (ImageNet tiene 1000 clases)
     return {
         "prediccion": ranking[0]["clase"],
         "confianza": ranking[0]["prob"],
