@@ -13,3 +13,4 @@ scipy                 # tfds lee las etiquetas .mat de Flowers-102 con scipy.io.
 # Reconstruir sin estos pines rompe el entrenamiento (visto el 2026-09-09).
 array_record==0.5.1
 protobuf==4.25.3
+tensorflow-metadata==1.15.0   # 1.16+ genera sus _pb2 con protoc 5 y exige protobuf>=5
