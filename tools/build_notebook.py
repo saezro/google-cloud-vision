@@ -70,14 +70,17 @@ code('''PROJECT       = _dd.value                               # el que elegist
 REGION        = "europe-west4"                           # región con GPU L4 (bucket + Cloud Run)
 BUCKET        = f"{PROJECT}-imagenes"                    # nombre del bucket (único por proyecto)
 
-MODEL_DIR     = "models/flores102"                       # tu CNN entrenada (carpeta en el bucket)
+MODEL_DIR     = "models/flores102"                       # A · tu CNN entrenada desde cero
 MODEL_GCS     = f"gs://{BUCKET}/{MODEL_DIR}"             # URI de tu modelo
-PRETRAIN_DIR  = "models/imagenet"                        # modelo pre-entrenado (lo descargamos)
+TRANSFER_DIR  = "models/flores102-transfer"              # B · MobileNetV2 re-entrenada a tus clases
+TRANSFER_GCS  = f"gs://{BUCKET}/{TRANSFER_DIR}"          # URI del modelo por transferencia
+PRETRAIN_DIR  = "models/imagenet"                        # C · MobileNet tal cual (1000 clases genéricas)
 PRETRAIN_GCS  = f"gs://{BUCKET}/{PRETRAIN_DIR}"          # URI del modelo pre-entrenado
 
 RUNTIME_SA = f"taller-vision-sa@{PROJECT}.iam.gserviceaccount.com"  # SA con la que corre todo
-JOB        = "taller-entrenar-flores"                   # Cloud Run job con GPU (entrena)
-SERVICE    = "taller-inferencia-flores"                 # Cloud Run service con GPU (sirve)
+JOB          = "taller-entrenar-flores"                 # Cloud Run job con GPU (entrena)
+JOB_TRANSFER = "taller-entrenar-transfer"               # el mismo job, con ARCH=transfer
+SERVICE      = "taller-inferencia-flores"               # Cloud Run service con GPU (sirve)
 
 # Imágenes de contenedor YA CONSTRUIDAS (pre-charla). El deploy las usa con --image (~30s, sin build).
 REPO    = f"{REGION}-docker.pkg.dev/{PROJECT}/cloud-run-source-deploy"
@@ -103,6 +106,7 @@ ejecútala y a otra cosa.""")
 code('''import io, json, time, subprocess
 import requests, numpy as np, pandas as pd, matplotlib.pyplot as plt
 from PIL import Image
+from IPython.display import display
 !pip -q install google-cloud-storage
 from google.cloud import storage
 
@@ -285,19 +289,20 @@ def coste_estimado():
     P_GPU, P_VCPU, P_MEM, P_STORE_MES = 0.000233, 0.0000240, 0.0000025, 0.020  # $/s y $/GiB·mes
     mem_gib = int("".join(ch for ch in MEMORY if ch.isdigit()))                # "16Gi" -> 16
     filas = []
-    # 1) Job: sumar la duración de TODAS las ejecuciones (incluidas las fallidas, también cuestan)
-    out = subprocess.run(["gcloud", "run", "jobs", "executions", "list", "--job", JOB,
-        "--region", REGION, "--format=value(status.startTime,status.completionTime)"],
-        capture_output=True, text=True).stdout.strip().splitlines()
+    # 1) Jobs: sumar la duración de TODAS las ejecuciones (incluidas las fallidas, también cuestan)
     seg, n = 0.0, 0
-    for ln in out:
-        p = ln.split()
-        if len(p) == 2:
-            t0 = datetime.fromisoformat(p[0].replace("Z", "+00:00"))
-            t1 = datetime.fromisoformat(p[1].replace("Z", "+00:00"))
-            seg += max((t1 - t0).total_seconds(), 0); n += 1
+    for job in (JOB, JOB_TRANSFER):
+        out = subprocess.run(["gcloud", "run", "jobs", "executions", "list", "--job", job,
+            "--region", REGION, "--format=value(status.startTime,status.completionTime)"],
+            capture_output=True, text=True).stdout.strip().splitlines()
+        for ln in out:
+            p = ln.split()
+            if len(p) == 2:
+                t0 = datetime.fromisoformat(p[0].replace("Z", "+00:00"))
+                t1 = datetime.fromisoformat(p[1].replace("Z", "+00:00"))
+                seg += max((t1 - t0).total_seconds(), 0); n += 1
     c_job = seg * (P_GPU + CPU * P_VCPU + mem_gib * P_MEM)
-    filas.append(("Job entrenamiento (GPU L4)", f"{seg/60:.1f} min · {n} ejec.", round(c_job, 3)))
+    filas.append(("Jobs de entrenamiento (GPU L4)", f"{seg/60:.1f} min · {n} ejec.", round(c_job, 3)))
     # 2) Storage del bucket (prorrateado ~1 día)
     gib = sum((b.size or 0) for b in _sc.list_blobs(BUCKET)) / (1024**3)
     filas.append(("Storage (bucket, ~1 día)", f"{gib:.2f} GiB", round(gib * P_STORE_MES / 30, 3)))
@@ -307,6 +312,128 @@ def coste_estimado():
     print("ESTIMACIÓN (no es la factura real; precios aprox. europe-west4, USD)")
     print(f"TOTAL ESTIMADO ≈ ${df['coste_usd_aprox'].sum():.2f}")
     return df
+
+def _metrics(model_dir):
+    """Lee el metrics.json de un modelo del bucket. `model_dir` es 'models/loquesea'."""
+    return json.loads(_bucket().blob(f"{model_dir.strip('/')}/metrics.json").download_as_text())
+
+def comparar_modelos(*model_dirs):
+    """Tabla comparativa de varios modelos: cuánto aciertan, cuánto ocupan y cuánto costó entrenarlos.
+
+    Todos se evalúan sobre el MISMO conjunto de validación, así que los números son comparables."""
+    filas = []
+    for d in model_dirs:
+        try:
+            m = _metrics(d)
+        except Exception:
+            print(f"(sin metrics.json: {d})"); continue
+        seg = m.get("train_seconds")
+        filas.append({
+            "modelo": d.split("/", 1)[-1],
+            "arquitectura": m.get("arch", "pre-entrenado"),
+            "top-1": f"{m['val_accuracy']*100:.1f}%" if m.get("val_accuracy") else "—",
+            "top-5": f"{m['val_top5']*100:.1f}%" if m.get("val_top5") else "—",
+            "params": f"{m['n_params']/1e6:.2f} M" if m.get("n_params") else "—",
+            "entrenables": f"{m['n_params_entrenables']/1e6:.2f} M" if m.get("n_params_entrenables") else "—",
+            "épocas": m.get("epochs", "—"),
+            "entreno": f"{seg/60:.1f} min" if seg else "—",
+            "img": m.get("img_size"),
+        })
+    return pd.DataFrame(filas)
+
+def curvas_comparadas(*model_dirs):
+    """Superpone las curvas de aprendizaje. Se ve de un vistazo que el transfer arranca ya alto."""
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(13, 4.5))
+    for d in model_dirs:
+        try:
+            h = _metrics(d)["history"]
+        except Exception:
+            continue
+        etq = d.split("/", 1)[-1]
+        a1.plot(h["val_accuracy"], marker="o", ms=3, label=etq)
+        a2.plot(h["val_loss"], marker="o", ms=3, label=etq)
+    a1.set_title("Accuracy en validación"); a1.set_xlabel("época"); a1.legend(); a1.grid(alpha=.3)
+    a2.set_title("Loss en validación"); a2.set_xlabel("época"); a2.legend(); a2.grid(alpha=.3)
+    plt.tight_layout(); plt.show()
+
+def informe_por_clase(model_dir, n=10):
+    """Precision, recall y F1 por clase, derivados de la matriz de confusión.
+
+    accuracy sola engaña: un modelo puede acertar mucho de media y fallar sistemáticamente
+    en las clases que a ti te importan. Esto es lo que hay que mirar."""
+    m = _metrics(model_dir); C = np.array(m["matriz_confusion"]); clases = m["classes"]
+    tp = np.diag(C).astype(float)
+    soporte = C.sum(axis=1)                    # cuántas imágenes reales hay de cada clase
+    predichas = C.sum(axis=0)                  # cuántas veces el modelo dijo esa clase
+    precision = np.divide(tp, predichas, out=np.zeros_like(tp), where=predichas > 0)
+    recall = np.divide(tp, soporte, out=np.zeros_like(tp), where=soporte > 0)
+    denom = precision + recall
+    f1 = np.divide(2 * precision * recall, denom, out=np.zeros_like(tp), where=denom > 0)
+    df = pd.DataFrame({"clase": clases, "precision": precision.round(3), "recall": recall.round(3),
+                       "f1": f1.round(3), "soporte": soporte}).sort_values("f1", ascending=False)
+    print(f"{model_dir}  ·  F1 macro (media sin ponderar): {f1.mean():.3f}")
+    print(f"\\nLas {n} clases que MEJOR reconoce:"); display(df.head(n).reset_index(drop=True))
+    print(f"\\nLas {n} que PEOR — aquí es donde se pierde dinero en producción:")
+    display(df.tail(n).reset_index(drop=True))
+    return df
+
+def matriz_confusion(model_dir, n=18):
+    """Heatmap de la matriz de confusión, quedándonos con las N clases que más se confunden.
+
+    Con 102 clases la matriz entera no se lee. Nos quedamos con las peores: la diagonal es
+    lo que acierta, todo lo que se sale de ella es con QUÉ lo confunde."""
+    m = _metrics(model_dir); C = np.array(m["matriz_confusion"]); clases = m["classes"]
+    acierto = np.divide(np.diag(C), np.maximum(C.sum(axis=1), 1))
+    peores = np.argsort(acierto)[:n]                    # las n clases con menos acierto
+    sub = C[np.ix_(peores, peores)].astype(float)
+    filas = np.maximum(sub.sum(axis=1, keepdims=True), 1)
+    fig, ax = plt.subplots(figsize=(10, 8.5))
+    im = ax.imshow(sub / filas, cmap="RdYlGn", vmin=0, vmax=1)
+    etq = [clases[i][:22] for i in peores]
+    ax.set_xticks(range(n)); ax.set_xticklabels(etq, rotation=90, fontsize=7)
+    ax.set_yticks(range(n)); ax.set_yticklabels(etq, fontsize=7)
+    ax.set_xlabel("lo que PREDIJO"); ax.set_ylabel("lo que ERA de verdad")
+    ax.set_title(f"Confusión en las {n} clases peor reconocidas — {model_dir.split('/')[-1]}")
+    for i in range(n):
+        for j in range(n):
+            if sub[i, j]:
+                ax.text(j, i, int(sub[i, j]), ha="center", va="center", fontsize=6.5)
+    fig.colorbar(im, ax=ax, shrink=.7, label="proporción de la clase real")
+    plt.tight_layout(); plt.show()
+
+def benchmark_latencia(uri, modelos, repeticiones=12):
+    """Mide la latencia REAL del service con cada modelo y estima el coste por 1.000 inferencias.
+
+    `modelos` es un dict {etiqueta: ruta_gcs}. La primera llamada de cada modelo carga el
+    SavedModel en la GPU (arranque en frío) y se descarta: no representa el régimen normal."""
+    P_GPU, P_VCPU, P_MEM = 0.000233, 0.0000240, 0.0000025      # $/segundo en europe-west4
+    mem_gib = int("".join(ch for ch in MEMORY if ch.isdigit()))
+    coste_seg = P_GPU + CPU * P_VCPU + mem_gib * P_MEM
+    tok = subprocess.run(["gcloud", "auth", "print-identity-token"],
+                         capture_output=True, text=True).stdout.strip()
+    url = f"{_service_url()}/predict"
+    filas = []
+    for etq, ruta in modelos.items():
+        ms = []
+        for i in range(repeticiones + 1):
+            t0 = time.time()
+            r = requests.post(url, json={"image_gcs": uri, "model_gcs": ruta},
+                              headers={"Authorization": f"Bearer {tok}"}, timeout=180)
+            dt = (time.time() - t0) * 1000
+            if i == 0:
+                frio = dt          # la primera carga el modelo: fuera del cálculo
+                continue
+            ms.append(dt)
+        ms = np.array(ms)
+        filas.append({
+            "modelo": etq,
+            "arranque en frío": f"{frio/1000:.1f} s",
+            "p50": f"{np.percentile(ms, 50):.0f} ms",
+            "p95": f"{np.percentile(ms, 95):.0f} ms",
+            "$/1.000 inferencias": round(np.percentile(ms, 50) / 1000 * coste_seg * 1000, 4),
+        })
+    print("Latencia extremo a extremo (incluye la red desde Colab, no solo la GPU).")
+    return pd.DataFrame(filas)
 
 print("Utilidades listas")''')
 
@@ -526,10 +653,89 @@ code('''clasificar(IMG, modelo=PRETRAIN_GCS)
 clasificar(f"gs://{BUCKET}/demo/rosa.jpg", modelo=PRETRAIN_GCS)
 clasificar(f"gs://{BUCKET}/demo/margarita.jpg", modelo=PRETRAIN_GCS)''')
 
-# ============================================================ 9 · INVENTARIO DE MODELOS
-md("""## Paso 9 · Inventario de modelos (un mini "registro")
+# ============================================================ 9 · COMPARAR MODELOS
+md("""## Paso 9 · Comparar modelos con datos, no con impresiones
 
-Ya tienes **dos** modelos, y con el tiempo más. Cada uno guarda su ficha (`metrics.json`) al lado, así
+Hasta aquí hemos entrenado un modelo y servido otro. La pregunta de verdad, la que se hace cualquiera
+que vaya a poner esto en producción, es otra: **¿cuál elijo, y cómo lo justifico?**
+
+Tenemos tres candidatos sobre el **mismo dataset** y el **mismo service**, que es la única forma de
+que los números sean comparables:
+
+| | Modelo | Qué es | Qué esperar |
+|---|---|---|---|
+| **A** | `flores102` | CNN **desde cero**: aprende a ver partiendo de nada | acierto modesto, entreno largo |
+| **B** | `flores102-transfer` | **MobileNetV2** de ImageNet congelada + cabeza nueva de 102 clases | mucho más acierto, entreno corto |
+| **C** | `imagenet` | MobileNet **tal cual**, sin tocar | falla: sus 1.000 clases no son tus flores |
+
+La comparación A vs B es la decisión de arquitectura más rentable del taller, y C es el recordatorio
+de que un modelo excelente en abstracto es inútil si no responde **tu** pregunta.
+
+### Entrenar el modelo B (transfer learning)
+
+Es **el mismo job y la misma imagen**: solo cambia `ARCH=transfer`. Corre en segundo plano y en la
+sesión ya está entrenado, así que no esperamos.""")
+code('''!gcloud run jobs deploy {JOB_TRANSFER} --image {IMG_JOB} --region {REGION} \\
+  --service-account {RUNTIME_SA} \\
+  --gpu 1 --gpu-type {GPU_TYPE} --no-gpu-zonal-redundancy \\
+  --cpu {CPU} --memory {MEMORY} --task-timeout 3600 --max-retries 0 \\
+  --set-env-vars BUCKET={BUCKET},MODEL_DIR={TRANSFER_DIR},ARCH=transfer -q
+!gcloud run jobs execute {JOB_TRANSFER} --region {REGION} --async
+print("Entrenando el modelo por transferencia. El de la sesión ya está en el bucket.")''')
+
+md("""### La tabla que enseñarías en una reunión
+
+Acierto, tamaño y coste de entrenamiento, lado a lado.""")
+code('''comparar_modelos(MODEL_DIR, TRANSFER_DIR)''')
+
+md("""Fíjate en la columna **entrenables**: el modelo por transferencia tiene muchos más parámetros
+en total, pero entrena solo una fracción — el resto viene aprendido. Por eso cuesta menos GPU y
+acierta más. Menos cómputo y mejor resultado a la vez.
+
+### Cómo aprendió cada uno""")
+code('''curvas_comparadas(MODEL_DIR, TRANSFER_DIR)''')
+
+md("""El de transferencia **arranca ya alto en la primera época**: no está aprendiendo a ver, solo a
+nombrar flores. La CNN desde cero tiene que aprender antes qué es un borde.
+
+### Dónde falla exactamente
+
+La accuracy media es un número tranquilizador y poco útil. Lo que importa en producción es **qué
+clases falla y con qué las confunde** — ahí es donde un error cuesta dinero.""")
+code('''matriz_confusion(MODEL_DIR)''')
+md("""Cada fila es una clase real y cada columna lo que el modelo predijo: la diagonal es acierto y
+todo lo que se sale de ella es una confusión concreta, con nombre y apellidos.""")
+code('''informe_por_clase(MODEL_DIR)''')
+md("""**Precision** = de las veces que dijo esta clase, cuántas acertó (mide falsos positivos).
+**Recall** = de las que había de verdad, cuántas encontró (mide lo que se le escapa). Según el caso
+de uso te importa una u otra: en un control de calidad prefieres no dejar pasar un defecto (recall);
+en una alerta que despierta a alguien de noche, prefieres no dar falsas alarmas (precision).
+
+Y lo mismo para el modelo por transferencia, para ver si además de acertar más, falla mejor:""")
+code('''informe_por_clase(TRANSFER_DIR)''')
+
+md("""### Los tres, sobre la misma foto
+
+Mismo endpoint, misma imagen, tres modelos. Solo cambia a cuál apuntamos.""")
+code('''clasificar(IMG, modelo=MODEL_GCS)      # A · CNN desde cero
+clasificar(IMG, modelo=TRANSFER_GCS)   # B · transfer learning
+clasificar(IMG, modelo=PRETRAIN_GCS)   # C · MobileNet de ImageNet, sin adaptar''')
+md("""C contesta con aplomo una clase de ImageNet que no es lo que le preguntas. **Un modelo no sabe
+que no sabe**: por eso se evalúa contra tus datos y no contra la reputación del modelo.
+
+### Lo que de verdad pregunta un cliente: cuánto tarda y cuánto cuesta""")
+code('''benchmark_latencia(IMG, {"A · desde cero": MODEL_GCS,
+                          "B · transfer": TRANSFER_GCS,
+                          "C · imagenet": PRETRAIN_GCS})''')
+md("""El **arranque en frío** es el precio de escalar a cero: la primera petición carga el modelo en
+la GPU. Si tu tráfico es a ráfagas, compensa de sobra; si necesitas respuesta inmediata siempre,
+subes `--min-instances` a 1 y pagas la GPU parada. Esa es la decisión, y ahora tienes el número
+para tomarla en vez de opinar.""")
+
+# ============================================================ 10 · INVENTARIO DE MODELOS
+md("""## Paso 10 · Inventario de modelos (un mini "registro")
+
+Ya tienes **tres** modelos, y con el tiempo más. Cada uno guarda su ficha (`metrics.json`) al lado, así
 que **el propio bucket es el registro**: listando esas fichas tienes un inventario (un DataFrame), sin
 base de datos aparte.""")
 code('''inventario = registro_modelos()
@@ -541,8 +747,8 @@ ruta = inventario.set_index("modelo").loc["imagenet", "ruta_gcs"]
 print("Uso el modelo:", ruta)
 clasificar(IMG, modelo=ruta)''')
 
-# ============================================================ 10 · CIERRE
-md("""## Paso 10 · Repaso, costes y limpieza
+# ============================================================ 11 · CIERRE
+md("""## Paso 11 · Repaso, costes y limpieza
 
 Este es el mapa de **todo lo que hemos hecho y dónde ha ocurrido cada cosa** — Colab solo daba
 órdenes; lo pesado vivió siempre en tu proyecto de Google Cloud:""")

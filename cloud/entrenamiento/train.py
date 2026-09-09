@@ -11,9 +11,15 @@ una CNN desde cero combinamos `train+test` y evaluamos en `validation`.
 Lee config de variables de entorno (las pone el deploy/execute):
   BUCKET      bucket de GCS donde se guarda el modelo (obligatorio)
   MODEL_DIR   prefijo del modelo dentro del bucket   (def: models/flores102)
-  EPOCHS      épocas de entrenamiento                (def: 40)
-  IMG_SIZE    lado de la imagen cuadrada             (def: 180)
+  ARCH        scratch | transfer                     (def: scratch)
+  EPOCHS      épocas de entrenamiento                (def: 40 / 12 si transfer)
+  IMG_SIZE    lado de la imagen cuadrada             (def: 180 / 224 si transfer)
   BATCH       tamaño de lote                         (def: 64)
+
+Dos arquitecturas, mismo dataset y mismo `metrics.json`, para poder compararlas:
+  scratch   CNN propia entrenada desde cero — aprende los filtros de la nada.
+  transfer  MobileNetV2 pre-entrenada en ImageNet, congelada, con una cabeza
+            nueva de 102 clases — reaprovecha lo que ya sabe de imágenes.
 
 Salida en gs://BUCKET/MODEL_DIR/ :
   saved_model/   (SavedModel servible)
@@ -57,6 +63,35 @@ def construir_modelo(n_clases: int, img: int = 180) -> tf.keras.Model:
     ])
 
 
+def construir_modelo_transfer(n_clases: int, img: int = 224) -> tf.keras.Model:
+    """MobileNetV2 pre-entrenada en ImageNet, congelada, con cabeza nueva.
+
+    La diferencia con `construir_modelo`: aquí NO aprendemos a ver desde cero.
+    MobileNetV2 ya trae filtros aprendidos sobre 1,4 millones de imágenes; lo
+    único que entrenamos es la última capa que traduce esos rasgos a nuestras
+    102 flores. Por eso converge en pocas épocas y acierta mucho más.
+
+    El preprocesado va DENTRO del modelo (igual que en la CNN desde cero) para
+    que el servicio de inferencia pueda mandarle píxeles 0-255 sin saber nada
+    de la arquitectura.
+    """
+    from tensorflow.keras import layers, models
+    base = tf.keras.applications.MobileNetV2(
+        input_shape=(img, img, 3), include_top=False, weights="imagenet")
+    base.trainable = False  # congelada: solo entrenamos la cabeza
+    return models.Sequential([
+        layers.Input(shape=(img, img, 3)),
+        layers.RandomFlip("horizontal"),
+        layers.RandomRotation(0.10),
+        layers.RandomZoom(0.10),
+        layers.Rescaling(1.0 / 127.5, offset=-1),  # MobileNetV2 espera [-1, 1]
+        base,
+        layers.GlobalAveragePooling2D(),
+        layers.Dropout(0.2),
+        layers.Dense(n_clases, activation="softmax"),
+    ])
+
+
 def preparar(img: int, batch: int):
     """Carga Flores-102 de tfds. Entrena con train+test (~7k), evalúa en validation."""
     import tensorflow_datasets as tfds  # import perezoso: el cuaderno importa construir_modelo sin tfds
@@ -76,25 +111,36 @@ def preparar(img: int, batch: int):
 
 def main():
     BUCKET = os.environ["BUCKET"]
+    ARCH = os.getenv("ARCH", "scratch").strip().lower()
+    if ARCH not in ("scratch", "transfer"):
+        raise SystemExit(f"ARCH debe ser 'scratch' o 'transfer', no {ARCH!r}")
     MODEL_DIR = os.getenv("MODEL_DIR", "models/flores102").strip("/")
-    EPOCHS = int(os.getenv("EPOCHS", "40"))
-    IMG = int(os.getenv("IMG_SIZE", "180"))
+    # Transfer converge en pocas épocas y MobileNetV2 espera 224 px.
+    EPOCHS = int(os.getenv("EPOCHS", "12" if ARCH == "transfer" else "40"))
+    IMG = int(os.getenv("IMG_SIZE", "224" if ARCH == "transfer" else "180"))
     BATCH = int(os.getenv("BATCH", "64"))
 
     gpus = tf.config.list_physical_devices("GPU")
     print(f"GPUs visibles: {gpus or 'NINGUNA (CPU)'}", flush=True)
+    print(f"ARCH={ARCH}  IMG={IMG}  EPOCHS={EPOCHS}  BATCH={BATCH}", flush=True)
 
     ds_tr, ds_va, clases = preparar(IMG, BATCH)
     print(f"Dataset {DATASET}: {len(clases)} clases", flush=True)
 
-    model = construir_modelo(len(clases), IMG)
+    if ARCH == "transfer":
+        model = construir_modelo_transfer(len(clases), IMG)
+    else:
+        model = construir_modelo(len(clases), IMG)
     model.compile(
         optimizer="adam",
         loss="sparse_categorical_crossentropy",
         metrics=["accuracy", tf.keras.metrics.SparseTopKCategoricalAccuracy(k=5, name="top5")])
     model.summary()
 
+    import time
+    t0 = time.time()
     hist = model.fit(ds_tr, validation_data=ds_va, epochs=EPOCHS)
+    train_seconds = round(time.time() - t0, 1)
     val_acc = float(hist.history["val_accuracy"][-1])
     val_top5 = float(hist.history["val_top5"][-1])
     print(f"val_accuracy={val_acc:.3f}  val_top5={val_top5:.3f}", flush=True)
@@ -125,6 +171,12 @@ def main():
         "img_size": IMG,
         "epochs": EPOCHS,
         "dataset": DATASET,
+        # Campos de comparación entre modelos (tabla A vs B vs C del taller).
+        "arch": ARCH,
+        "n_params": int(model.count_params()),
+        "n_params_entrenables": int(
+            sum(int(tf.size(w)) for w in model.trainable_weights)),
+        "train_seconds": train_seconds,
         "history": {k: [round(float(x), 4) for x in v] for k, v in hist.history.items()},
         "accuracy_por_clase": por_clase,
         "matriz_confusion": confusion,
