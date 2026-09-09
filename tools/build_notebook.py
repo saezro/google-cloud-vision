@@ -84,7 +84,7 @@ SERVICE      = "taller-inferencia-flores"               # Cloud Run service con 
 
 # Imágenes de contenedor YA CONSTRUIDAS (pre-charla). El deploy las usa con --image (~30s, sin build).
 REPO    = f"{REGION}-docker.pkg.dev/{PROJECT}/cloud-run-source-deploy"
-IMG_JOB = f"{REPO}/taller-entrenar-flores:latest"       # imagen del entrenamiento (CUDA)
+IMG_JOB = f"{REPO}/taller-entrenar-flores:v4"           # imagen del entrenamiento (CUDA), tag fijo
 IMG_SVC = f"{REPO}/taller-inferencia-flores:latest"     # imagen de la inferencia (CUDA)
 
 # --- Configuración de la MÁQUINA (lo que pides a Cloud Run para job y service) ---
