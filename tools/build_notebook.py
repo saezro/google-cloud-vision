@@ -219,15 +219,36 @@ def _service_url():
                            "--format=value(status.url)"], capture_output=True, text=True).stdout.strip()
 
 def _token():
-    """Token de identidad para llamar al service. Si sale vacío, el 401 luego no se entiende."""
+    """Token de identidad para llamar al service.
+
+    En local `gcloud auth print-identity-token` vale. En COLAB no: authenticate_user()
+    deja credenciales que no pueden emitir ID tokens, así que ahí se pide el token en
+    nombre de la SA del taller (hace falta roles/iam.serviceAccountTokenCreator, se
+    concede en el Paso 3.2).
+    """
     p = subprocess.run(["gcloud", "auth", "print-identity-token"], capture_output=True, text=True)
     tok = p.stdout.strip()
-    if not tok:
-        raise RuntimeError("gcloud no ha devuelto token de identidad.\\n"
-                           f"   {p.stderr.strip()[:300]}\\n"
-                           "   En Colab: reejecuta la celda de autenticación. En local: "
-                           "gcloud auth login")
-    return tok
+    if tok:
+        return tok
+    try:
+        import google.auth
+        from google.auth import impersonated_credentials
+        from google.auth.transport.requests import Request
+        base, _ = google.auth.default()
+        origen = impersonated_credentials.Credentials(
+            source_credentials=base, target_principal=RUNTIME_SA,
+            target_scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        idc = impersonated_credentials.IDTokenCredentials(
+            origen, target_audience=_service_url(), include_email=True)
+        idc.refresh(Request())
+        return idc.token
+    except Exception as e:
+        raise RuntimeError(
+            "No se ha podido conseguir un token de identidad para el service.\\n"
+            f"   gcloud dijo: {p.stderr.strip()[:200]}\\n"
+            f"   impersonando {RUNTIME_SA} falló con: {type(e).__name__}: {str(e)[:200]}\\n"
+            "   Si es un 403 de IAM, falta el rol serviceAccountTokenCreator (Paso 3.2). "
+            "En local basta con: gcloud auth login")
 
 def _pedir(url, payload, timeout=180):
     """POST al service. Si la respuesta no es un JSON, dice POR QUÉ en vez de reventar
@@ -612,9 +633,17 @@ code('''# 3.1 — Crear la service account con la que correrán job y service
   --display-name="Taller Vision runtime" 2>/dev/null || echo "(ya existe)"
 
 # ...y darle acceso al bucket y a consumir APIs
-for ROLE in ["roles/storage.admin", "roles/serviceusage.serviceUsageConsumer"]:
+for ROLE in ["roles/storage.admin", "roles/serviceusage.serviceUsageConsumer",
+             "roles/run.invoker"]:   # invoker: el token de Colab se pide a nombre de esta SA
     !gcloud projects add-iam-policy-binding {PROJECT} \\
       --member="serviceAccount:{RUNTIME_SA}" --role={ROLE} --condition=None -q > /dev/null
+
+# ...y permitir que YO pida ID tokens en su nombre. Sin esto, en Colab no hay forma
+# de llamar al service: authenticate_user() no puede emitir tokens de identidad.
+YO = !gcloud config get-value account
+!gcloud iam service-accounts add-iam-policy-binding {RUNTIME_SA} \\
+  --member="user:{YO[0]}" --role="roles/iam.serviceAccountTokenCreator" -q > /dev/null
+
 print("Service account de runtime con permisos")''')
 code('''# 3.2 — Permisos de despliegue para quien construye (las DOS posibles SA de build)
 _pnum = !gcloud projects describe {PROJECT} --format="value(projectNumber)"
