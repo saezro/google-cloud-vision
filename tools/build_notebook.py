@@ -14,8 +14,18 @@ REPO_DIR = "gcv"
 
 cells = []
 md = lambda s: cells.append({"cell_type": "markdown", "metadata": {}, "source": s.splitlines(keepends=True)})
-def code(s):
-    cells.append({"cell_type": "code", "metadata": {}, "execution_count": None,
+def code(s, plegada=None):
+    """Añade una celda de código. Con `plegada="texto"` sale COLAPSADA en Colab.
+
+    Las celdas que solo definen funciones ocupan pantallas enteras y en la charla
+    obligan a hacer scroll delante de todo el mundo. Colab pliega una celda si su
+    primera línea es `#@title` y su metadata dice `cellView: form`: se ve una sola
+    línea con el título y un triángulo para abrirla si alguien pregunta."""
+    meta = {}
+    if plegada:
+        s = f"#@title {plegada}\n{s}"
+        meta = {"cellView": "form"}
+    cells.append({"cell_type": "code", "metadata": meta, "execution_count": None,
                   "outputs": [], "source": s.rstrip("\n").splitlines(keepends=True)})
 
 # ============================================================ PORTADA
@@ -115,7 +125,13 @@ from google.cloud import storage
 # --- Estilo común de las gráficas -----------------------------------------
 # Plotly en vez de matplotlib: en la charla se hace zoom y se pasa el ratón por
 # encima para leer valores exactos sin volver a ejecutar nada.
-pio.renderers.default = "notebook"          # incrusta plotly.js: el .ipynb se ve sin conexión
+# OJO: en Colab hay que dejar el renderer que él detecta ("colab"). Forzar "notebook"
+# deja TODAS las gráficas en blanco, incluido el modelo 3D. Fuera de Colab sí se fuerza,
+# para que el .ipynb guardado lleve plotly.js dentro y se vea sin conexión.
+try:
+    import google.colab            # noqa: F401
+except ImportError:
+    pio.renderers.default = "notebook"
 # Azul / naranja / violeta: separación validada también en daltonismo (protan/deutan/tritan)
 # y contraste >= 3:1 contra el fondo, que en proyector es donde se cae todo.
 C_SERIE = ["#2a78d6", "#eb6834", "#4a3aa7"]
@@ -202,17 +218,40 @@ def _service_url():
     return subprocess.run(["gcloud", "run", "services", "describe", SERVICE, "--region", REGION,
                            "--format=value(status.url)"], capture_output=True, text=True).stdout.strip()
 
+def _token():
+    """Token de identidad para llamar al service. Si sale vacío, el 401 luego no se entiende."""
+    p = subprocess.run(["gcloud", "auth", "print-identity-token"], capture_output=True, text=True)
+    tok = p.stdout.strip()
+    if not tok:
+        raise RuntimeError("gcloud no ha devuelto token de identidad.\\n"
+                           f"   {p.stderr.strip()[:300]}\\n"
+                           "   En Colab: reejecuta la celda de autenticación. En local: "
+                           "gcloud auth login")
+    return tok
+
+def _pedir(url, payload, timeout=180):
+    """POST al service. Si la respuesta no es un JSON, dice POR QUÉ en vez de reventar
+    con un JSONDecodeError, que en directo no dice nada."""
+    r = requests.post(url, json=payload, headers={"Authorization": f"Bearer {_token()}"},
+                      timeout=timeout)
+    if r.status_code != 200 or "json" not in r.headers.get("content-type", "").lower():
+        pista = ("el token de identidad no vale para este service"
+                 if r.status_code in (401, 403) else
+                 "el service ha fallado sirviendo el modelo; mira los logs de Cloud Run"
+                 if r.status_code >= 500 else "respuesta inesperada")
+        raise RuntimeError(f"El service respondió {r.status_code} y no un JSON ({pista}).\\n"
+                           f"   {r.text[:300]}")
+    return r.json()
+
 def clasificar(uri, modelo=None):
     """Llama al modelo servido en Cloud Run. `modelo` elige cuál (por defecto, el del service).
 
     El service es agnóstico al modelo: si le pasas `model_gcs`, sirve ese. Así el MISMO
     endpoint clasifica con tu CNN o con el modelo pre-entrenado, según a cuál apuntes."""
-    tok = subprocess.run(["gcloud", "auth", "print-identity-token"], capture_output=True, text=True).stdout.strip()
     payload = {"image_gcs": uri}
     if modelo:
         payload["model_gcs"] = modelo
-    d = requests.post(f"{_service_url()}/predict", json=payload,
-                      headers={"Authorization": f"Bearer {tok}"}, timeout=180).json()
+    d = _pedir(f"{_service_url()}/predict", payload)
     print(f"{uri}\\n   -> {d['prediccion']}  ({d['confianza']}%)   top: {[r['clase'] for r in d['ranking']]}")
     return d
 
@@ -497,8 +536,7 @@ def benchmark_latencia(uri, modelos, repeticiones=12):
     P_GPU, P_VCPU, P_MEM = 0.000233, 0.0000240, 0.0000025      # $/segundo en europe-west4
     mem_gib = int("".join(ch for ch in MEMORY if ch.isdigit()))
     coste_seg = P_GPU + CPU * P_VCPU + mem_gib * P_MEM
-    tok = subprocess.run(["gcloud", "auth", "print-identity-token"],
-                         capture_output=True, text=True).stdout.strip()
+    tok = _token()
     url = f"{_service_url()}/predict"
     filas = []
     for etq, ruta in modelos.items():
@@ -508,6 +546,8 @@ def benchmark_latencia(uri, modelos, repeticiones=12):
             r = requests.post(url, json={"image_gcs": uri, "model_gcs": ruta},
                               headers={"Authorization": f"Bearer {tok}"}, timeout=180)
             dt = (time.time() - t0) * 1000
+            if r.status_code != 200:      # medir la latencia de un error no significa nada
+                raise RuntimeError(f"{etq}: el service respondió {r.status_code} — {r.text[:200]}")
             if i == 0:
                 frio = dt          # la primera carga el modelo: fuera del cálculo
                 continue
@@ -542,7 +582,8 @@ def benchmark_latencia(uri, modelos, repeticiones=12):
     fig.update_layout(bargap=.3, bargroupgap=.06).show()
     return df
 
-print("Utilidades listas")''')
+print("Utilidades listas")''',
+     plegada="Utilidades del taller · ejecútala y sigue (ábrela solo si quieres ver el código)")
 
 
 # ============================================================ 2 · APIs
