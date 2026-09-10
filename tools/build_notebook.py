@@ -105,10 +105,53 @@ pintar las gráficas, llamar al modelo servido). **No hace falta leerlo** para s
 ejecútala y a otra cosa.""")
 code('''import io, json, time, subprocess
 import requests, numpy as np, pandas as pd, matplotlib.pyplot as plt
+import plotly.graph_objects as go, plotly.io as pio
+from plotly.subplots import make_subplots
 from PIL import Image
 from IPython.display import display
 !pip -q install google-cloud-storage
 from google.cloud import storage
+
+# --- Estilo común de las gráficas -----------------------------------------
+# Plotly en vez de matplotlib: en la charla se hace zoom y se pasa el ratón por
+# encima para leer valores exactos sin volver a ejecutar nada.
+pio.renderers.default = "notebook"          # incrusta plotly.js: el .ipynb se ve sin conexión
+# Azul / naranja / violeta: separación validada también en daltonismo (protan/deutan/tritan)
+# y contraste >= 3:1 contra el fondo, que en proyector es donde se cae todo.
+C_SERIE = ["#2a78d6", "#eb6834", "#4a3aa7"]
+# Magnitud = un solo tono claro->oscuro. Nunca un arcoíris: el salto de color
+# sugiere saltos en los datos que no existen.
+C_RAMPA = [[0, "#cde2fb"], [0.25, "#86b6ef"], [0.5, "#3987e5"], [0.75, "#1c5cab"], [1, "#0d366b"]]
+_INK, _INK2, _MUTED, _GRID, _SURF, _EJE = "#0b0b0b", "#52514e", "#898781", "#e1e0d9", "#fcfcfb", "#c3c2b7"
+
+def _estilo(fig, titulo=None, alto=430):
+    """Aplica el mismo aspecto a todas las gráficas: rejilla discreta, tinta gris, leyenda arriba.
+
+    La leyenda sube por encima de los títulos de los paneles: si se deja a la altura
+    por defecto se los come."""
+    paneles = bool(fig.layout.annotations)      # make_subplots pone ahí los títulos de panel
+    arriba = 120 if (paneles and titulo) else 95 if paneles else 70 if titulo else 45
+    fig.update_layout(
+        template="none", height=alto, title=titulo,
+        paper_bgcolor=_SURF, plot_bgcolor=_SURF,
+        font=dict(family="Inter, Segoe UI, system-ui, sans-serif", size=13, color=_INK2),
+        title_font=dict(size=16, color=_INK),
+        margin=dict(l=60, r=30, t=arriba, b=60),
+        legend=dict(orientation="h", yanchor="bottom", bgcolor="rgba(0,0,0,0)",
+                    y=1.13 if paneles else 1.02, x=.5, xanchor="center"),
+    )
+    if paneles:                                  # separar los títulos de panel de la leyenda
+        for a in fig.layout.annotations:
+            a.font = dict(size=14, color=_INK)
+    fig.update_xaxes(showgrid=False, linecolor=_EJE, ticks="outside", tickcolor=_EJE, color=_MUTED)
+    fig.update_yaxes(showgrid=True, gridcolor=_GRID, zeroline=False,
+                     linecolor="rgba(0,0,0,0)", color=_MUTED)
+    return fig
+
+def _barras_redondeadas(fig):
+    try: fig.update_layout(barcornerradius=4)          # plotly >= 5.19
+    except Exception: pass
+    return fig
 
 _sc  = storage.Client(project=PROJECT)
 _bucket = lambda: _sc.bucket(BUCKET)
@@ -138,10 +181,18 @@ def stats():
     top5 = m.get("val_top5")
     print(f"clases: {len(m['classes'])}  |  val_accuracy (top-1): {m['val_accuracy']*100:.1f}%"
           + (f"  |  top-5: {top5*100:.1f}%" if top5 else ""))
-    fig, (a1, a2) = plt.subplots(1, 2, figsize=(12, 4))
-    a1.plot(h["accuracy"], label="train"); a1.plot(h["val_accuracy"], label="val"); a1.set_title("Accuracy"); a1.legend()
-    a2.plot(h["loss"], label="train"); a2.plot(h["val_loss"], label="val"); a2.set_title("Loss"); a2.legend()
-    plt.show()
+    ep = list(range(1, len(h["accuracy"]) + 1))
+    fig = make_subplots(rows=1, cols=2, horizontal_spacing=.11,
+                        subplot_titles=("Accuracy (acierto)", "Loss (error)"))
+    for col, (k_tr, k_va) in enumerate([("accuracy", "val_accuracy"), ("loss", "val_loss")], start=1):
+        for i, (k, nom) in enumerate([(k_tr, "entrenamiento"), (k_va, "validación")]):
+            fig.add_trace(go.Scatter(
+                x=ep, y=h[k], name=nom, legendgroup=nom, showlegend=(col == 1),
+                mode="lines+markers", line=dict(color=C_SERIE[i], width=2), marker=dict(size=8),
+                hovertemplate=f"<b>{nom}</b>: %{{y:.3f}}<extra></extra>"), row=1, col=col)
+        fig.update_xaxes(title_text="época", row=1, col=col)
+    fig.update_yaxes(tickformat=".0%", row=1, col=1)
+    _estilo(fig, alto=440).update_layout(hovermode="x unified").show()
     pc = sorted(m["accuracy_por_clase"].items(), key=lambda kv: kv[1], reverse=True)
     print("mejores clases:", [f"{k} {v:.0%}" for k, v in pc[:5]])
     print("peores clases: ", [f"{k} {v:.0%}" for k, v in pc[-5:]])
@@ -343,18 +394,25 @@ def comparar_modelos(*model_dirs):
 
 def curvas_comparadas(*model_dirs):
     """Superpone las curvas de aprendizaje. Se ve de un vistazo que el transfer arranca ya alto."""
-    fig, (a1, a2) = plt.subplots(1, 2, figsize=(13, 4.5))
-    for d in model_dirs:
+    fig = make_subplots(rows=1, cols=2, horizontal_spacing=.11,
+                        subplot_titles=("Accuracy en validación", "Loss en validación"))
+    for i, d in enumerate(model_dirs):
         try:
             h = _metrics(d)["history"]
         except Exception:
             continue
         etq = d.split("/", 1)[-1]
-        a1.plot(h["val_accuracy"], marker="o", ms=3, label=etq)
-        a2.plot(h["val_loss"], marker="o", ms=3, label=etq)
-    a1.set_title("Accuracy en validación"); a1.set_xlabel("época"); a1.legend(); a1.grid(alpha=.3)
-    a2.set_title("Loss en validación"); a2.set_xlabel("época"); a2.legend(); a2.grid(alpha=.3)
-    plt.tight_layout(); plt.show()
+        color = C_SERIE[i % len(C_SERIE)]           # el color va con el modelo, no con su puesto
+        ep = list(range(1, len(h["val_accuracy"]) + 1))
+        for col, k in enumerate(["val_accuracy", "val_loss"], start=1):
+            fig.add_trace(go.Scatter(
+                x=ep, y=h[k], name=etq, legendgroup=etq, showlegend=(col == 1),
+                mode="lines+markers", line=dict(color=color, width=2), marker=dict(size=8),
+                hovertemplate=f"<b>{etq}</b>: %{{y:.3f}}<extra></extra>"), row=1, col=col)
+    for col in (1, 2):
+        fig.update_xaxes(title_text="época", row=1, col=col)
+    fig.update_yaxes(tickformat=".0%", row=1, col=1)
+    _estilo(fig, alto=460).update_layout(hovermode="x unified").show()
 
 def informe_por_clase(model_dir, n=10):
     """Precision, recall y F1 por clase, derivados de la matriz de confusión.
@@ -375,6 +433,32 @@ def informe_por_clase(model_dir, n=10):
     print(f"\\nLas {n} clases que MEJOR reconoce:"); display(df.head(n).reset_index(drop=True))
     print(f"\\nLas {n} que PEOR — aquí es donde se pierde dinero en producción:")
     display(df.tail(n).reset_index(drop=True))
+    # En barras se ve de un golpe si el fallo es de precision (dice esa clase y no lo es)
+    # o de recall (era esa clase y no la vio). No es lo mismo y no se arregla igual.
+    # Ojo: en un modelo malo las N peores están TODAS a cero y el gráfico saldría en blanco,
+    # así que se pintan las peores que aún puntúan algo y las de cero se cuentan aparte.
+    ceros = df[df["f1"] == 0]
+    peor = df[df["f1"] > 0].tail(n).iloc[::-1]
+    modelo = model_dir.split("/")[-1]
+    if peor.empty:
+        print(f"({modelo}: ninguna clase con F1 > 0, no hay nada que pintar)")
+        return df
+    fig = go.Figure()
+    for i, (col, nom) in enumerate([("precision", "precision"), ("recall", "recall"), ("f1", "F1")]):
+        fig.add_trace(go.Bar(
+            x=peor["clase"], y=peor[col], name=nom, marker_color=C_SERIE[i],
+            hovertemplate=f"<b>%{{x}}</b><br>{nom}: %{{y:.2f}}<extra></extra>"))
+    fig.update_yaxes(range=[0, 1.02], tickformat=".0%")
+    fig.update_xaxes(tickangle=-40, automargin=True)
+    titulo = f"Las {len(peor)} clases peor reconocidas (de las que acierta alguna) — {modelo}"
+    _barras_redondeadas(_estilo(fig, titulo, alto=490))
+    fig.update_layout(bargap=.28, bargroupgap=.06, hovermode="x unified")
+    if len(ceros):
+        fig.add_annotation(
+            x=0, y=1.06, xref="paper", yref="paper", showarrow=False, xanchor="left",
+            font=dict(size=12, color=_MUTED),
+            text=f"Además hay {len(ceros)} clases con F1 = 0: el modelo no acierta ni una.")
+    fig.show()
     return df
 
 def matriz_confusion(model_dir, n=18):
@@ -387,19 +471,23 @@ def matriz_confusion(model_dir, n=18):
     peores = np.argsort(acierto)[:n]                    # las n clases con menos acierto
     sub = C[np.ix_(peores, peores)].astype(float)
     filas = np.maximum(sub.sum(axis=1, keepdims=True), 1)
-    fig, ax = plt.subplots(figsize=(10, 8.5))
-    im = ax.imshow(sub / filas, cmap="RdYlGn", vmin=0, vmax=1)
+    prop = sub / filas
     etq = [clases[i][:22] for i in peores]
-    ax.set_xticks(range(n)); ax.set_xticklabels(etq, rotation=90, fontsize=7)
-    ax.set_yticks(range(n)); ax.set_yticklabels(etq, fontsize=7)
-    ax.set_xlabel("lo que PREDIJO"); ax.set_ylabel("lo que ERA de verdad")
-    ax.set_title(f"Confusión en las {n} clases peor reconocidas — {model_dir.split('/')[-1]}")
-    for i in range(n):
-        for j in range(n):
-            if sub[i, j]:
-                ax.text(j, i, int(sub[i, j]), ha="center", va="center", fontsize=6.5)
-    fig.colorbar(im, ax=ax, shrink=.7, label="proporción de la clase real")
-    plt.tight_layout(); plt.show()
+    # El número de imágenes va escrito en la celda: el color da la intensidad, el texto el dato exacto
+    txt = [[str(int(v)) if v else "" for v in fila] for fila in sub]
+    fig = go.Figure(go.Heatmap(
+        z=prop, x=etq, y=etq, zmin=0, zmax=1, colorscale=C_RAMPA, xgap=2, ygap=2,
+        text=txt, texttemplate="%{text}", textfont=dict(size=10),
+        colorbar=dict(title=dict(text="proporción de<br>la clase real", side="right"),
+                      thickness=12, outlinewidth=0, tickformat=".0%", len=.8),
+        hovertemplate="ERA <b>%{y}</b><br>predijo <b>%{x}</b><br>"
+                      "%{text} imágenes · %{z:.0%} de la clase<extra></extra>"))
+    # scaleanchor: celdas cuadradas. Sin esto salen rectángulos alargados y la diagonal engaña.
+    fig.update_yaxes(autorange="reversed", title_text="lo que ERA de verdad", showgrid=False,
+                     scaleanchor="x", constrain="domain")
+    fig.update_xaxes(tickangle=-90, title_text="lo que PREDIJO", constrain="domain")
+    _estilo(fig, f"Confusión en las {n} clases peor reconocidas — {model_dir.split('/')[-1]}",
+            alto=700).update_layout(margin=dict(l=180, r=30, t=80, b=180)).show()
 
 def benchmark_latencia(uri, modelos, repeticiones=12):
     """Mide la latencia REAL del service con cada modelo y estima el coste por 1.000 inferencias.
@@ -433,7 +521,26 @@ def benchmark_latencia(uri, modelos, repeticiones=12):
             "$/1.000 inferencias": round(np.percentile(ms, 50) / 1000 * coste_seg * 1000, 4),
         })
     print("Latencia extremo a extremo (incluye la red desde Colab, no solo la GPU).")
-    return pd.DataFrame(filas)
+    df = pd.DataFrame(filas)
+    # p50 = lo que nota el usuario normal; p95 = lo que nota el que tiene mala suerte.
+    # La barra clara detrás es el arranque en frío, a otra escala: por eso va en su propio gráfico.
+    fig = make_subplots(rows=1, cols=2, horizontal_spacing=.16,
+                        subplot_titles=("Latencia por petición", "Coste por 1.000 inferencias"))
+    etqs = [f["modelo"] for f in filas]
+    for i, k in enumerate(["p50", "p95"]):
+        fig.add_trace(go.Bar(
+            x=etqs, y=[float(f[k].split()[0]) for f in filas], name=k, marker_color=C_SERIE[i],
+            hovertemplate=f"<b>%{{x}}</b><br>{k}: %{{y:.0f}} ms<extra></extra>"), row=1, col=1)
+    fig.add_trace(go.Bar(
+        x=etqs, y=[f["$/1.000 inferencias"] for f in filas], name="$ / 1.000", showlegend=False,
+        marker_color=C_SERIE[2], text=[f"${f['$/1.000 inferencias']:.3f}" for f in filas],
+        textposition="outside", textfont=dict(color=_INK2),
+        hovertemplate="<b>%{x}</b><br>$%{y:.4f} por 1.000<extra></extra>"), row=1, col=2)
+    fig.update_yaxes(title_text="milisegundos", row=1, col=1)
+    fig.update_yaxes(title_text="USD", tickprefix="$", row=1, col=2)
+    _barras_redondeadas(_estilo(fig, alto=440))
+    fig.update_layout(bargap=.3, bargroupgap=.06).show()
+    return df
 
 print("Utilidades listas")''')
 
