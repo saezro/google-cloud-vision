@@ -120,6 +120,11 @@ def main():
     IMG = int(os.getenv("IMG_SIZE", "224" if ARCH == "transfer" else "180"))
     BATCH = int(os.getenv("BATCH", "64"))
 
+    # Misma semilla = mismo resultado. Sin esto, los pesos nacen aleatorios en cada
+    # ejecución y la cifra final baila varios puntos: en una demo en directo, eso
+    # es la diferencia entre cuadrar con la slide o no.
+    tf.keras.utils.set_random_seed(SEED)
+
     gpus = tf.config.list_physical_devices("GPU")
     print(f"GPUs visibles: {gpus or 'NINGUNA (CPU)'}", flush=True)
     print(f"ARCH={ARCH}  IMG={IMG}  EPOCHS={EPOCHS}  BATCH={BATCH}", flush=True)
@@ -138,20 +143,40 @@ def main():
     model.summary()
 
     import time
+    import numpy as np
+
+    # La validación de Flowers-102 son ~10 imágenes por clase: la curva da botes y
+    # una época mala hunde la cifra. Bajar el learning rate cuando se estanca suaviza
+    # el final, y quedarse con los pesos de la MEJOR época evita que un bache justo
+    # en la última arruine la demo.
+    callbacks = [
+        tf.keras.callbacks.ReduceLROnPlateau(
+            monitor="val_accuracy", mode="max", factor=0.5, patience=3, min_lr=1e-5, verbose=1),
+        tf.keras.callbacks.EarlyStopping(
+            monitor="val_accuracy", mode="max", patience=8, restore_best_weights=True, verbose=1),
+    ]
+
     t0 = time.time()
-    hist = model.fit(ds_tr, validation_data=ds_va, epochs=EPOCHS)
+    hist = model.fit(ds_tr, validation_data=ds_va, epochs=EPOCHS, callbacks=callbacks)
     train_seconds = round(time.time() - t0, 1)
-    val_acc = float(hist.history["val_accuracy"][-1])
-    val_top5 = float(hist.history["val_top5"][-1])
-    print(f"val_accuracy={val_acc:.3f}  val_top5={val_top5:.3f}", flush=True)
+    # La métrica que se publica es la de los pesos que se guardan (la mejor época),
+    # no la de la última. Si no, el modelo servido y el número no son el mismo.
+    mejor = int(np.argmax(hist.history["val_accuracy"]))
+    val_acc = float(hist.history["val_accuracy"][mejor])
+    val_top5 = float(hist.history["val_top5"][mejor])
+    print(f"val_accuracy={val_acc:.3f}  val_top5={val_top5:.3f}  "
+          f"(mejor época: {mejor + 1} de {len(hist.history['val_accuracy'])})", flush=True)
 
     # --- Evaluación por clase + matriz de confusión (sobre validation) ----------
-    import numpy as np
-    y_true, y_pred = [], []
+    y_true, y_pred, confianzas = [], [], []
     for bx, by in ds_va:
         p = model.predict(bx, verbose=0)
         y_pred.extend(np.argmax(p, axis=1).tolist())
         y_true.extend(by.numpy().tolist())
+        # Probabilidad de la clase ganadora: con esto se dibuja la curva de umbral
+        # (si solo aceptas predicciones por encima de X, ¿cuánto aciertas y cuánto
+        # dejas para revisión humana?). Es la decisión de negocio del taller.
+        confianzas.extend(np.max(p, axis=1).round(4).tolist())
     n = len(clases)
     confusion = [[0] * n for _ in range(n)]
     for t, pr in zip(y_true, y_pred):
@@ -180,6 +205,11 @@ def main():
         "history": {k: [round(float(x), 4) for x in v] for k, v in hist.history.items()},
         "accuracy_por_clase": por_clase,
         "matriz_confusion": confusion,
+        # Una fila por imagen de validación: cuánta confianza tuvo y si acertó.
+        "confianza_validacion": {
+            "confianza": confianzas,
+            "acierto": [int(t == pr) for t, pr in zip(y_true, y_pred)],
+        },
     }
     with tf.io.gfile.GFile(f"gs://{BUCKET}/{MODEL_DIR}/metrics.json", "w") as f:
         f.write(json.dumps(metrics, indent=2))

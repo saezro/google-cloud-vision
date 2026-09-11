@@ -94,7 +94,7 @@ SERVICE      = "taller-inferencia-flores"               # Cloud Run service con 
 
 # Imágenes de contenedor YA CONSTRUIDAS (pre-charla). El deploy las usa con --image (~30s, sin build).
 REPO    = f"{REGION}-docker.pkg.dev/{PROJECT}/cloud-run-source-deploy"
-IMG_JOB = f"{REPO}/taller-entrenar-flores:v4"           # imagen del entrenamiento (CUDA), tag fijo
+IMG_JOB = f"{REPO}/taller-entrenar-flores:v5"           # imagen del entrenamiento (CUDA), tag fijo
 IMG_SVC = f"{REPO}/taller-inferencia-flores:latest"     # imagen de la inferencia (CUDA)
 
 # --- Configuración de la MÁQUINA (lo que pides a Cloud Run para job y service) ---
@@ -146,15 +146,19 @@ def _estilo(fig, titulo=None, alto=430):
     La leyenda sube por encima de los títulos de los paneles: si se deja a la altura
     por defecto se los come."""
     paneles = bool(fig.layout.annotations)      # make_subplots pone ahí los títulos de panel
-    arriba = 120 if (paneles and titulo) else 95 if paneles else 70 if titulo else 45
+    arriba = 150 if (paneles and titulo) else 95 if paneles else 70 if titulo else 45
+    # Con paneles Y título hay tres cosas peleando por el margen de arriba (título,
+    # leyenda y títulos de panel). El título por defecto se centra en ese margen y la
+    # leyenda se le monta encima: se ancla arriba del todo y la leyenda baja debajo.
+    tit = dict(text=titulo, y=.97, yanchor="top") if (paneles and titulo) else titulo
     fig.update_layout(
-        template="none", height=alto, title=titulo,
+        template="none", height=alto, title=tit,
         paper_bgcolor=_SURF, plot_bgcolor=_SURF,
         font=dict(family="Inter, Segoe UI, system-ui, sans-serif", size=13, color=_INK2),
         title_font=dict(size=16, color=_INK),
         margin=dict(l=60, r=30, t=arriba, b=60),
         legend=dict(orientation="h", yanchor="bottom", bgcolor="rgba(0,0,0,0)",
-                    y=1.13 if paneles else 1.02, x=.5, xanchor="center"),
+                    y=1.16 if paneles else 1.02, x=.5, xanchor="center"),
     )
     if paneles:                                  # separar los títulos de panel de la leyenda
         for a in fig.layout.annotations:
@@ -521,6 +525,56 @@ def informe_por_clase(model_dir, n=10):
     fig.show()
     return df
 
+def curva_umbral(*model_dirs, umbrales=(0.5, 0.7, 0.9)):
+    """La gráfica que convierte un modelo en una decisión de negocio.
+
+    Un clasificador siempre responde algo. Pero puedes exigirle un mínimo de confianza
+    y mandar el resto a revisión humana. Esta curva contesta las dos preguntas que
+    hace un cliente: si solo acepto lo que supera el X%, ¿cuánto acierto de lo que
+    acepto, y qué parte del trabajo sigo teniendo que hacer a mano?"""
+    fig = make_subplots(rows=1, cols=2, horizontal_spacing=.11,
+                        subplot_titles=("Acierto DE LO QUE ACEPTA",
+                                        "Cobertura: qué parte responde el modelo"))
+    filas, pintado = [], False
+    us = np.linspace(0, 0.98, 99)
+    for i, d in enumerate(model_dirs):
+        try:
+            cv = _metrics(d).get("confianza_validacion")
+        except Exception:
+            print(f"(sin metrics.json: {d})"); continue
+        if not cv:
+            print(f"({d}: su metrics.json es anterior a esta gráfica — reentrénalo para tenerla)")
+            continue
+        conf, ok = np.array(cv["confianza"]), np.array(cv["acierto"])
+        etq = d.split("/", 1)[-1]
+        color = C_SERIE[i % len(C_SERIE)]
+        cobertura = np.array([(conf >= u).mean() for u in us])
+        # Acierto solo entre las aceptadas. Donde no acepta nada no hay dato: NaN, no cero.
+        acierto = np.array([ok[conf >= u].mean() if (conf >= u).any() else np.nan for u in us])
+        for col, (y, nom) in enumerate([(acierto, "acierto"), (cobertura, "cobertura")], start=1):
+            fig.add_trace(go.Scatter(
+                x=us, y=y, name=etq, legendgroup=etq, showlegend=(col == 1),
+                mode="lines", line=dict(color=color, width=2.5),
+                hovertemplate=f"<b>{etq}</b><br>umbral %{{x:.0%}} → {nom} %{{y:.1%}}<extra></extra>"),
+                row=1, col=col)
+        pintado = True
+        for u in umbrales:
+            sel = conf >= u
+            filas.append({"modelo": etq, "umbral": f"{u:.0%}",
+                          "responde": f"{sel.mean():.0%}",
+                          "acierta de lo que responde": f"{ok[sel].mean():.0%}" if sel.any() else "—",
+                          "a revisión humana": f"{1 - sel.mean():.0%}"})
+    if not pintado:
+        return None
+    for col in (1, 2):
+        fig.update_xaxes(title_text="umbral de confianza exigido", tickformat=".0%", row=1, col=col)
+        fig.update_yaxes(tickformat=".0%", range=[0, 1.02], row=1, col=col)
+    _estilo(fig, "Cuánto puedes automatizar según lo exigente que seas", alto=460)
+    # b=60 (el del estilo común) deja el título del eje X pegado al borde: aquí los dos
+    # paneles llevan título abajo y hace falta más aire.
+    fig.update_layout(hovermode="x unified", margin=dict(b=85)).show()
+    return pd.DataFrame(filas)
+
 def matriz_confusion(model_dir, n=18):
     """Heatmap de la matriz de confusión, quedándonos con las N clases que más se confunden.
 
@@ -653,13 +707,32 @@ BUILD_SAS = [f"{PNUM}-compute@developer.gserviceaccount.com",  # builder por def
 
 ROLES = ["roles/run.admin", "roles/iam.serviceAccountUser", "roles/artifactregistry.admin",
          "roles/storage.admin", "roles/logging.logWriter", "roles/cloudbuild.builds.builder"]
+def _conceder(*args):
+    """Concede un binding en silencio. gcloud escribe su "Updated IAM policy" por
+    stderr, y son 14: en pantalla parecen un bucle atascado. Aquí va un contador."""
+    p = subprocess.run(["gcloud", *args, "-q"], capture_output=True, text=True)
+    return p.returncode == 0, p.stderr.strip()[-200:]
+
+TOTAL = len(BUILD_SAS) * (len(ROLES) + 1)
+hechos, fallos = 0, []
 for SA in BUILD_SAS:
+    corto = SA.split("@")[0]
     for ROLE in ROLES:
-        !gcloud projects add-iam-policy-binding {PROJECT} \\
-          --member="serviceAccount:{SA}" --role={ROLE} --condition=None -q > /dev/null
+        ok, err = _conceder("projects", "add-iam-policy-binding", PROJECT,
+                            f"--member=serviceAccount:{SA}", f"--role={ROLE}", "--condition=None")
+        hechos += 1
+        if not ok: fallos.append((corto, ROLE, err))
+        print(f"\\r[{hechos}/{TOTAL}] {corto} -> {ROLE.split('/')[-1]}".ljust(70), end="", flush=True)
     # "actuar como" la SA de runtime: el permiso que más se olvida
-    !gcloud iam service-accounts add-iam-policy-binding {RUNTIME_SA} \\
-      --member="serviceAccount:{SA}" --role="roles/iam.serviceAccountUser" -q > /dev/null
+    ok, err = _conceder("iam", "service-accounts", "add-iam-policy-binding", RUNTIME_SA,
+                        f"--member=serviceAccount:{SA}", "--role=roles/iam.serviceAccountUser")
+    hechos += 1
+    if not ok: fallos.append((corto, "serviceAccountUser sobre la SA de runtime", err))
+    print(f"\\r[{hechos}/{TOTAL}] {corto} -> actuar como la SA de runtime".ljust(70), end="", flush=True)
+
+print(f"\\r{hechos} permisos concedidos".ljust(70))
+for sa, rol, err in fallos:
+    print(f"   FALLO: {sa} / {rol} -> {err}")
 print("Permisos de build concedidos (espera ~30-60s a que el IAM propague)")''')
 
 # ============================================================ 4 · BUCKET
@@ -721,7 +794,7 @@ md("""### Hiperparámetros del entrenamiento
 Estos son los mandos del entrenamiento. Cámbialos aquí (es lo que define cómo y cuánto entrena):
 - `EPOCHS`: cuántas pasadas al dataset. Más = mejor (hasta cierto punto) pero más lento.
 - `IMG_SIZE`: a qué tamaño se redimensiona cada imagen de entrada de la CNN.""")
-code('''EPOCHS   = 15    # épocas (en GPU L4, ~14 s/época → ~3-4 min con 15)
+code('''EPOCHS   = 25    # épocas (en GPU L4, ~14 s/época → ~6 min con 25)
 IMG_SIZE = 180   # lado de la imagen de entrada (px)''')
 
 md("""### La arquitectura de la CNN
@@ -900,6 +973,17 @@ clasificar(IMG, modelo=PRETRAIN_GCS)   # C · MobileNet de ImageNet, sin adaptar
 md("""C contesta con aplomo una clase de ImageNet que no es lo que le preguntas. **Un modelo no sabe
 que no sabe**: por eso se evalúa contra tus datos y no contra la reputación del modelo.
 
+### Y si no le dejamos contestar siempre
+
+Un clasificador nunca dice "no sé": reparte el 100 % entre las clases que conoce y te da la más alta.
+Pero **tú sí puedes exigirle un mínimo**: aceptar solo lo que supere cierta confianza y mandar el
+resto a una persona. Eso ya no es una métrica, es el diseño del proceso.""")
+code('''curva_umbral(MODEL_DIR, TRANSFER_DIR)''')
+md("""Así se lee: subir el umbral **sube el acierto de lo que aceptas** y **baja la parte que el modelo
+resuelve solo**. No hay umbral "correcto" — depende de lo que cueste un error frente a lo que cueste
+una revisión manual. Ese número lo pone el negocio, no el modelo; el modelo solo dice a qué precio
+sale cada opción.
+
 ### Lo que de verdad pregunta un cliente: cuánto tarda y cuánto cuesta""")
 code('''benchmark_latencia(IMG, {"A · desde cero": MODEL_GCS,
                           "B · transfer": TRANSFER_GCS,
@@ -909,8 +993,72 @@ la GPU. Si tu tráfico es a ráfagas, compensa de sobra; si necesitas respuesta 
 subes `--min-instances` a 1 y pagas la GPU parada. Esa es la decisión, y ahora tienes el número
 para tomarla en vez de opinar.""")
 
-# ============================================================ 10 · INVENTARIO DE MODELOS
-md("""## Paso 10 · Inventario de modelos (un mini "registro")
+# ============================================================ 10 · DETECCIÓN (YOLO)
+md("""## Paso 10 · Clasificar no es lo único: detectar con YOLO
+
+Todo lo anterior **clasifica**: mira una foto entera y devuelve *una* etiqueta. Es lo que necesitas
+cuando la imagen ya viene acotada (una pieza, una flor, un documento). Pero la pregunta de fábrica
+suele ser otra: **"¿qué hay en esta imagen y dónde está?"** — varias cosas a la vez, cada una con su
+caja. Eso es **detección**, otra familia de modelos, y YOLO es la más usada.
+
+Aquí no entrenamos nada: cargamos `yolov8n` (unos 6 MB) con los pesos públicos de COCO — 80 objetos
+corrientes: personas, coches, botellas, sillas… — y hacemos **inferencia** para ver la mecánica.
+
+> **Dónde corre esto.** Lo ejecutamos en el propio Colab a propósito: es un modelo diminuto y así se
+> ve el resultado en un segundo. En producción iría exactamente igual que la CNN — metido en la misma
+> imagen de contenedor y servido por Cloud Run.
+>
+> ⚠️ **Licencia — importante si esto acaba en un producto.** Ultralytics (el paquete de YOLO) es
+> **AGPL-3.0**: si lo usas en un servicio que ofreces a terceros, la licencia te obliga a publicar tu
+> código. Para probar y aprender, ningún problema; para vender, o se compra licencia comercial o se
+> usa otra familia de detectores. Es la clase de detalle que cuesta caro descubrir tarde.""")
+code('''!pip -q install ultralytics
+from ultralytics import YOLO
+
+detector = YOLO("yolov8n.pt")        # pesos COCO, sin entrenar nada nuestro
+print("Detector listo:", len(detector.names), "clases que sabe localizar")''')
+
+md("""Necesitamos una foto con objetos cotidianos (nuestras flores no son clases de COCO). La bajamos
+**una vez** y la dejamos en el bucket, igual que el resto del material del taller:""")
+code('''CALLE = f"gs://{BUCKET}/demo/calle.jpg"
+_blob = _bucket().blob("demo/calle.jpg")
+if not _blob.exists():
+    _blob.upload_from_string(
+        requests.get("https://ultralytics.com/images/bus.jpg", timeout=60).content,
+        content_type="image/jpeg")
+    print("subida a", CALLE)
+else:
+    print("ya estaba en", CALLE)''')
+
+md("Y detectamos. Fíjate en que **no devuelve una etiqueta, devuelve una lista de cajas**:")
+code('''def detectar(uri, umbral=0.35):
+    """Igual que `clasificar`, pero en vez de UNA etiqueta devuelve QUÉ hay y DÓNDE."""
+    ruta = uri[5:].split("/", 1)
+    img = Image.open(io.BytesIO(_sc.bucket(ruta[0]).blob(ruta[1]).download_as_bytes())).convert("RGB")
+    r = detector.predict(np.array(img), conf=umbral, verbose=False)[0]
+    plt.figure(figsize=(9, 7)); plt.imshow(r.plot()[:, :, ::-1]); plt.axis("off"); plt.show()
+    hallado = [f"{r.names[int(c)]} {p:.0%}" for c, p in zip(r.boxes.cls, r.boxes.conf)]
+    print(f"{uri.split('/')[-1]} → " + (", ".join(hallado) or "(no ha detectado nada)"))
+    return hallado
+
+detectar(CALLE)''')
+
+md("""Cada caja lleva **clase, confianza y coordenadas**. Ahí es donde vive el valor industrial:
+contar piezas, comprobar que todas están, marcar la que falta o la que está mal puesta.
+
+Y ahora el mismo detector sobre **nuestra flor**, la que la CNN clasificaba sin dudar:""")
+code('''detectar(IMG, umbral=0.25)''')
+md("""Casi seguro que no encuentra nada, o dice `potted plant`. **No es que falle: es que nadie le
+enseñó flores.** Mismo mensaje que con el modelo C, y la conclusión práctica del taller:
+
+- **Clasificación vs detección son problemas distintos** y se eligen por la pregunta, no por la moda.
+- Un modelo público te da **la mecánica gratis**; los datos que le importan a tu negocio los pones tú.
+- Para detectar *tus* piezas o *tus* defectos hay que etiquetar imágenes **con cajas** y hacer
+  fine-tuning del detector. Es más trabajo que clasificar, y por eso conviene saber antes cuál de las
+  dos preguntas estás respondiendo.""")
+
+# ============================================================ 11 · INVENTARIO DE MODELOS
+md("""## Paso 11 · Inventario de modelos (un mini "registro")
 
 Ya tienes **tres** modelos, y con el tiempo más. Cada uno guarda su ficha (`metrics.json`) al lado, así
 que **el propio bucket es el registro**: listando esas fichas tienes un inventario (un DataFrame), sin
@@ -924,8 +1072,8 @@ ruta = inventario.set_index("modelo").loc["imagenet", "ruta_gcs"]
 print("Uso el modelo:", ruta)
 clasificar(IMG, modelo=ruta)''')
 
-# ============================================================ 11 · CIERRE
-md("""## Paso 11 · Repaso, costes y limpieza
+# ============================================================ 12 · CIERRE
+md("""## Paso 12 · Repaso, costes y limpieza
 
 Este es el mapa de **todo lo que hemos hecho y dónde ha ocurrido cada cosa** — Colab solo daba
 órdenes; lo pesado vivió siempre en tu proyecto de Google Cloud:""")
